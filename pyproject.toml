@@ -1,0 +1,137 @@
+[project]
+name = "openrot"
+description = "Local proxy rotator with WARP → VLESS → free proxies cascade"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Daniil Pavlovich", email = "layred.dota2@mail.ru" },
+]
+requires-python = ">=3.14"
+dynamic = ["version"]
+dependencies = [
+    "typer[all]>=0.12,<0.13",
+    "rich>=13.0,<14",
+    "pyyaml>=6.0,<7",
+    "pydantic>=2.0,<3",
+    "httpx[socks]>=0.27,<0.28",
+]
+
+[project.scripts]
+openrot = "openrot.cli:app"
+
+[tool.poetry]
+packages = [{ include = "openrot" }]
+version = "0.0.0"
+
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1.1"
+ruff = "^0.16"
+mypy = "^1.14"
+pre-commit = "^4.0"
+pyinstaller = { version = "^6.22.2", python = ">=3.14,<3.16" }
+pytest-cov = "^7.1.0"
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+pretty = true
+show_error_codes = true
+implicit_reexport = true
+warn_unused_ignores = false
+warn_return_any = false
+namespace_packages = true
+
+[tool.pytest.ini_options]
+addopts = ["-v", "--tb=short", "--strict-config", "--cov=openrot", "-m", "not integration"]
+markers = [
+    "integration: full-loop tests hitting real network sources and sing-box (slow; excluded from the default run)",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    "ignore:.*unclosed.*:ResourceWarning",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["openrot"]
+omit = ["openrot/__init__.py", "openrot/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 75
+skip_covered = true
+show_missing = true
+
+[tool.ruff]
+include = ["openrot/**/*.py", "tests/**/*.py"]
+line-length = 88
+fix = true
+unsafe-fixes = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "N",
+    "D",
+    "ANN",
+    "S",
+    "B",
+    "COM",
+    "C",
+    "ISC",
+    "PIE",
+    "T",
+    "PYI",
+    "Q",
+    "RSE",
+    "RET",
+    "SLF",
+    "SIM",
+    "PTH",
+    "ERA",
+    "PLR",
+    "RUF",
+    "UP",
+]
+ignore = [
+    "D105",
+    "D107",
+    "B008",
+    "D211",
+    "D212",
+    "D401",
+    "D104",
+    "D100",
+    "D202",
+    "ANN401",
+    "PLR0913",
+    "D106",
+    "RUF001",
+    "RUF003",
+    "COM812",
+]
+fixable = ["ALL"]
+mccabe = { max-complexity = 10 }
+pydocstyle = { convention = "pep257", ignore-decorators = ["typing.overload"] }
+isort = { force-single-line = false, known-first-party = ["openrot"] }
+pylint = { allow-magic-value-types = ["int", "str", "float", "bytes"] }
+
+per-file-ignores = { "tests/*" = ["S101", "S104", "S105", "S106", "D101", "D102", "D103", "SLF001", "ERA001"] }
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[build-system]
+requires = ["poetry-core", "poetry-dynamic-versioning>=1.4.0"]
+build-backend = "poetry.core.masonry.api"

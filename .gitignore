@@ -1,0 +1,28 @@
+# Docs
+/mvp-docs/
+
+# Agent state
+.opencode/
+AGENTS.md
+
+# Local runtime config
+/.openrot/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# sing-box runtime
+*.json.tmp
+
+# Codegraph state
+.codegraph
