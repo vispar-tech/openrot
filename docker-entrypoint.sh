@@ -13,6 +13,11 @@ MODE="${1:-both}"
 PORT="${OPENROT_PORT:-7890}"
 
 case "$MODE" in
+  --*|-*)
+    # Any CLI flag (e.g. --version, --help) is forwarded straight to openrot
+    # instead of being treated as a run mode.
+    exec openrot "$@"
+    ;;
   cascade)
     exec openrot start cascade
     ;;
