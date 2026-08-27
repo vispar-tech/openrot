@@ -126,8 +126,14 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          merge-multiple: true
           pattern: openrot-*.tar.gz
+
+      - name: Flatten downloads into artifacts/
+        run: |
+          mkdir -p artifacts
+          find . -path './artifacts' -prune -o -name 'openrot-*.tar.gz' -type f -print | while read -r f; do
+            cp "$f" artifacts/
+          done
 
       - name: Generate checksums
         working-directory: artifacts
