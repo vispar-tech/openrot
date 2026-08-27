@@ -127,6 +127,7 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+          pattern: openrot-*.tar.gz
 
       - name: Generate checksums
         working-directory: artifacts
