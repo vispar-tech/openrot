@@ -40,14 +40,14 @@ goes down.
 the `warp-cli` + sing-box prerequisites and brings WARP up:
 
 ```bash
-curl -fsSL https://github.com/vispar-tech/openrot/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh | bash
 ```
 
 **Docker** (WARP still runs on the host) — installs prerequisites and runs the
 image from GHCR:
 
 ```bash
-curl -fsSL https://github.com/vispar-tech/openrot/releases/latest/download/install-docker.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install-docker.sh | bash
 ```
 
 > The first method installs the standalone binary to `~/.local/bin/openrot`.

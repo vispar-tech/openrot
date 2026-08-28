@@ -279,8 +279,9 @@ parse (дедуп vless:// / proto://host:port)
 **Автономный бинарь** (PyInstaller, Python не нужен):
 
 ```bash
-./install.sh        # из репозитория
-make installer      # то же самое
+curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh | bash
+# или, из репозитория:
+./install.sh
 ```
 
 Переменные окружения: `OPENROT_BIN_URL`, `OPENROT_VERSION`, `OPENROT_PREFIX`,

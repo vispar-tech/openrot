@@ -2,7 +2,7 @@
 #
 # openrot — run openrot in Docker, wired to the host-side WARP.
 #
-#   curl -fsSL <URL>/install-docker.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install-docker.sh | bash
 #
 # Installs warp-cli on the host, brings WARP up in proxy mode, then runs the
 # openrot container with the correct network mode for the platform (host on

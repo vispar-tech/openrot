@@ -2,7 +2,7 @@
 #
 # openrot — install the standalone `openrot` binary (PyInstaller onedir build).
 #
-#   curl -fsSL <URL>/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh | bash
 #
 # Installs warp-cli and sing-box prerequisites, downloads the openrot onedir
 # build (launcher + _internal/ payload) and brings WARP up on the host in
