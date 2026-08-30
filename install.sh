@@ -141,9 +141,23 @@ download_binary() {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve the latest release tag when OPENROT_VERSION is unset
+# ---------------------------------------------------------------------------
+resolve_latest() {
+    [ "$VERSION" != "latest" ] && return 0
+    VERSION="$(curl -fsSL -m 20 \
+        https://api.github.com/repos/vispar-tech/openrot/releases/latest \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+    [ -n "$VERSION" ] || { VERSION="latest"; warn "Could not resolve latest release tag; using '$VERSION'"; }
+    URL_BASE="https://github.com/vispar-tech/openrot/releases/download/$VERSION"
+    say "Latest release: $VERSION"
+}
+
+# ---------------------------------------------------------------------------
 main() {
     macos || linux || die "Unsupported OS. Supported: macOS, Linux."
     say "openrot installer (standalone binary)"
+    resolve_latest
     install_warp
     start_warp
     check_singbox
