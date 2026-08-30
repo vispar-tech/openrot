@@ -23,6 +23,9 @@ openrot = "openrot.cli:app"
 packages = [{ include = "openrot" }]
 version = "0.0.0"
 
+[tool.poetry.requires-plugins]
+poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
+
 [tool.poetry-dynamic-versioning]
 enable = true
 vcs = "git"
@@ -133,5 +136,5 @@ line-ending = "auto"
 docstring-code-format = true
 
 [build-system]
-requires = ["poetry-core", "poetry-dynamic-versioning>=1.4.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"

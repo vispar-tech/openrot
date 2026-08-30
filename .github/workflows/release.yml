@@ -32,6 +32,9 @@ jobs:
       OPENROT_VERSION: ${{ github.ref_name }}       # passed to poetry-dynamic-versioning
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -44,16 +47,14 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            .venv
-            poetry.lock
-          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+      - name: Install versioning plugin
+        run: poetry self add "poetry-dynamic-versioning[plugin]"
 
       - name: Install dependencies
         run: poetry install
+
+      - name: Show tagged version
+        run: poetry run python -c "import importlib.metadata as m; print('building version:', m.version('openrot'))"
 
       - name: Build standalone binary (PyInstaller)
         run: poetry run pyinstaller --noconfirm --clean openrot.spec
