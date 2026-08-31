@@ -21,7 +21,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from openrot import __version__, signals
+from openrot import __version__, self_update, signals
 from openrot import config as cfg
 from openrot.config import (
     ActiveLevel,
@@ -826,6 +826,33 @@ def warp_status(
 
 
 app.add_typer(warp_app, name="warp")
+
+
+@app.command("self-update")
+def self_update_cmd(
+    yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
+) -> None:
+    """Update the openrot binary to the latest release."""
+    with activity("checking for updates..."):
+        result = self_update.check_for_update()
+    if result.updated or result.current == result.latest:
+        console.print(f"[green]{result.message}[/green]")
+        raise typer.Exit
+
+    console.print(f"[yellow]{result.message}[/yellow]")
+    _ensure_confirmed("Download and install the update?", yes)
+
+    def _progress(stage: str, done: int, total: int) -> None:
+        if stage == "done":
+            console.print("[green]install complete[/green]")
+        elif total:
+            pct = int(done * 100 / total)
+            console.print(f"  {stage}: {pct}%  ({done}/{total})")
+
+    with activity("updating..."):
+        result = self_update.perform_update(progress_fn=_progress)
+    console.print(f"[green]{result.message}[/green]")
+    console.print("restart your shell or run 'openrot --version' to verify")
 
 
 if __name__ == "__main__":
