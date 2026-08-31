@@ -726,7 +726,6 @@ def _progress_reports(
             total=total,
             completed=kept,
         )
-        probe_core.pipeline_stage(stage, kept, total)
 
     def report_live(stage: str, done: int, total: int) -> None:
         progress.update(
