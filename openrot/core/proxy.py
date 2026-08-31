@@ -124,4 +124,4 @@ def stop_proxy(pid: int | None = None) -> bool:
         if not is_running(pid):
             return True
         time.sleep(0.1)
-    return True
+    return False

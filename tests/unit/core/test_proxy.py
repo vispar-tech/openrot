@@ -120,8 +120,14 @@ def test_is_running_true_on_permission_error(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_stop_proxy_sends_term(monkeypatch: pytest.MonkeyPatch) -> None:
     signals: list[tuple[int, int]] = []
+    call_count = {"n": 0}
+
+    def fake_is_running(pid: int) -> bool:
+        call_count["n"] += 1
+        return call_count["n"] <= 1
+
     monkeypatch.setattr(proxy, "load_pid", lambda: 5)
-    monkeypatch.setattr(proxy, "is_running", lambda pid: True)
+    monkeypatch.setattr(proxy, "is_running", fake_is_running)
     monkeypatch.setattr(proxy.os, "kill", lambda *a: signals.append(a))
     assert proxy.stop_proxy(5) is True
     assert signals == [(5, proxy.signal.SIGTERM)]
