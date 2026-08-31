@@ -6,14 +6,12 @@ repos:
         entry: poetry run ruff format
         language: system
         types: [python]
-        pass_filenames: false
 
       - id: ruff-lint
         name: Check with Ruff
         entry: poetry run ruff check
         language: system
         types: [python]
-        pass_filenames: false
         always_run: true
 
       - id: mypy

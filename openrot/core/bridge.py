@@ -282,6 +282,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: D102
         self._handle("OPTIONS")
 
+    def do_PUT(self) -> None:  # noqa: D102
+        self._handle("PUT")
+
+    def do_DELETE(self) -> None:  # noqa: D102
+        self._handle("DELETE")
+
+    def do_PATCH(self) -> None:  # noqa: D102
+        self._handle("PATCH")
+
+    def do_HEAD(self) -> None:  # noqa: D102
+        self._handle("HEAD")
+
     def log_message(self, fmt: str, *args: object) -> None:
         """Log a request line to the events log."""
         events.info("bridge %s", fmt % args)

@@ -193,7 +193,7 @@ def _do_update(
             progress_fn("extracting", 0, 1)
 
         with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(tmp)  # noqa: S202
+            tar.extractall(tmp, filter="data")
 
         src_dir = Path(tmp)
         inner = src_dir / "openrot"
