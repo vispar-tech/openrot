@@ -14,9 +14,8 @@ What breaks? One or two sentences.
 
 ## Logs and config
 
-Run `openrot doctor` and paste the output (add `openrot status --json` too if
-the issue is about the active level). Paste `config.yaml` as well, with any
-secrets removed.
+Run `openrot status --json` and paste the output. Paste `config.yaml` as well,
+with any secrets removed.
 
 ## Environment
 

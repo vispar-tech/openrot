@@ -516,3 +516,58 @@ def test_commit_health() -> None:
     reached, fails = cascade._commit_health(conf, "n1", True)
     assert reached is False and fails == 0
     assert node.fails == 0
+
+
+def test_warp_health_loop_falls_back_to_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When WARP drops, the loop stops the proxy and starts the node chain."""
+    call_count = {"n": 0}
+
+    def fake_sleep(s: float) -> None:
+        call_count["n"] += 1
+
+    def fake_load() -> Config:
+        return Config(update_interval=0, health_interval=1)
+
+    def fake_is_connected() -> bool:
+        return False
+
+    _patch_events(monkeypatch)
+    monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
+    monkeypatch.setattr(cascade.warp, "is_connected", fake_is_connected)
+    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
+    monkeypatch.setattr(cascade, "start_node", lambda fg: None)
+
+    cascade.warp_health_loop()
+
+    assert call_count["n"] == 1
+
+
+def test_warp_health_loop_continues_while_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loop keeps running while WARP is connected; exits via SystemExit."""
+    call_count = {"n": 0}
+
+    def fake_sleep(s: float) -> None:
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise SystemExit(0)
+
+    def fake_load() -> Config:
+        return Config(update_interval=0, health_interval=1)
+
+    def fake_is_connected() -> bool:
+        return True
+
+    _patch_events(monkeypatch)
+    monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
+    monkeypatch.setattr(cascade.warp, "is_connected", fake_is_connected)
+
+    with pytest.raises(SystemExit):
+        cascade.warp_health_loop()
+
+    assert call_count["n"] == 2
