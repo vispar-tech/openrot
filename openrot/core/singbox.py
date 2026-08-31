@@ -172,21 +172,15 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _port_open(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=0.2):
-            return True
-    except OSError:
-        return False
-
-
 def _wait_for_port(host: str, port: int, timeout: float, step: float = 0.05) -> bool:
     """Poll until `host:port` accepts connections or `timeout` elapses."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _port_open(host, port):
-            return True
-        time.sleep(step)
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(step)
     return False
 
 

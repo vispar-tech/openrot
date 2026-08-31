@@ -118,6 +118,10 @@ def stop_proxy(pid: int | None = None) -> bool:
         return False
     try:
         os.kill(pid, signal.SIGTERM)
-        return True
     except OSError:
         return False
+    for _ in range(50):
+        if not is_running(pid):
+            return True
+        time.sleep(0.1)
+    return True

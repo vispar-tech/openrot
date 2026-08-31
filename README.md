@@ -2,7 +2,7 @@
 
 ![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen)
-![Coverage](https://img.shields.io/badge/Coverage-%3E85%25-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-%3E75%25-brightgreen)
 ![Built for opencode](https://img.shields.io/badge/Built%20for-opencode-7c3aed)
 
 **English** · [Русский](README.ru.md)

@@ -17,3 +17,8 @@ Dockerfile
 .pre-commit-config.yaml
 Makefile
 install.sh
+install-docker.sh
+CONTRIBUTING.md
+CONTRIBUTING.ru.md
+README.ru.md
+openrot.spec
