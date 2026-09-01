@@ -55,8 +55,10 @@ def test_all_updates_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
     )
 
-    def fake_pool(*a: object, **k: object) -> list[tuple[tuple[str, object], float]]:
-        return [(("r1", object()), 10.0)]
+    def fake_pool(
+        *a: object, **k: object
+    ) -> list[tuple[tuple[str, object], float, str | None]]:
+        return [(("r1", object()), 10.0, None)]
 
     monkeypatch.setattr("openrot.core.health.verify.verify_vless_pool", fake_pool)
     assert test_all(c) == 1
@@ -92,7 +94,9 @@ def test_all_forwards_urltest_url(monkeypatch: pytest.MonkeyPatch) -> None:
     c.urltest_url = "https://probe.example/x"
     seen: dict[str, object] = {}
 
-    def fake_pool(*a: object, **k: object) -> list[tuple[tuple[str, object], float]]:
+    def fake_pool(
+        *a: object, **k: object
+    ) -> list[tuple[tuple[str, object], float, str | None]]:
         seen["urltest_url"] = k.get("urltest_url")
         return []
 
@@ -133,7 +137,7 @@ def test_check_node_vless_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     parsed = object()
     monkeypatch.setattr("openrot.core.health.parse_vless", lambda raw: parsed)
     monkeypatch.setattr(
-        "openrot.core.health.probe_vless", lambda vn, sb, to: (True, 3.0)
+        "openrot.core.health.probe_vless", lambda vn, sb, to: (True, 3.0, None)
     )
     assert check_node(node, Config()) == (True, 3.0)
 

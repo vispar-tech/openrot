@@ -451,7 +451,7 @@ def test_handler_returns_502_on_upstream_error(
 
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
 
-    def boom(cfg_obj: object, request: object) -> object:
+    def boom(cfg_obj: object, request: object, **kwargs: object) -> object:
         raise bridge.UpstreamError("up boom")
 
     monkeypatch.setattr(bridge, "forward", boom)

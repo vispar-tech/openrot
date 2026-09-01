@@ -134,24 +134,24 @@ def _run_stage[T](
 
 def _probe_latencies(
     node: vless.VlessNode, singbox_bin: str, timeout: float, url: str | None
-) -> list[float]:
-    """Probe one node; return [latency_ms] on a 2xx, [] otherwise."""
-    alive, latency = probe_vless(node, singbox_bin, timeout, url)
-    return [latency] if alive and latency is not None else []
+) -> tuple[list[float], str | None]:
+    """Probe one node; return ([latency_ms], egress_ip) on a 2xx."""
+    alive, latency, egress_ip = probe_vless(node, singbox_bin, timeout, url)
+    return ([latency] if alive and latency is not None else [], egress_ip)
 
 
 def _run_probe[T](
     items: list[T],
-    fn: Callable[[T], list[float]],
+    fn: Callable[[T], tuple[list[float], str | None]],
     on_stage: Stage | None,
     on_progress: ProgressFn | None,
     max_workers: int = MAX_WORKERS,
-) -> list[tuple[T, float]]:
+) -> list[tuple[T, float, str | None]]:
     """Probe `items` in a worker pool; keep survivors that reached the urltest URL.
 
     A survivor needs the configured urltest URL reachable (non-empty latency
     sample). ``on_progress`` fires after every finished node; ranks by median
-    latency.
+    latency. Returns (item, latency, egress_ip) tuples sorted by latency.
     """
     total = len(items)
     if total == 0:
@@ -159,24 +159,45 @@ def _run_probe[T](
             on_stage("probe", 0, 0)
         return []
     needed = 1
-    results: list[tuple[T, float]] = []
+    results: list[tuple[T, float, str | None]] = []
     done = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(fn, it): it for it in items}
         for fut in as_completed(futures):
             done += 1
             try:
-                latencies = fut.result()
+                latencies, egress_ip = fut.result()
             except Exception:
-                latencies = []
+                latencies, egress_ip = [], None
             if len(latencies) >= needed:
-                results.append((futures[fut], median(latencies)))
+                results.append((futures[fut], median(latencies), egress_ip))
             if on_progress is not None:
                 on_progress("probe", done, total)
     if on_stage is not None:
         on_stage("probe", len(results), total)
     results.sort(key=lambda entry: entry[1])
     return results
+
+
+def _dedupe_by_ip[T](
+    survivors: list[tuple[T, float, str | None]],
+) -> list[tuple[T, float, str | None]]:
+    """Deduplicate survivors by egress_ip, keeping the lowest-latency entry per IP.
+
+    Entries without an egress_ip always pass through.
+    """
+    by_ip: dict[str, list[tuple[T, float, str | None]]] = {}
+    no_ip: list[tuple[T, float, str | None]] = []
+    for entry in survivors:
+        ip = entry[2]
+        if ip is None:
+            no_ip.append(entry)
+        else:
+            by_ip.setdefault(ip, []).append(entry)
+    result: list[tuple[T, float, str | None]] = list(no_ip)
+    for ip_group in by_ip.values():
+        result.append(min(ip_group, key=lambda e: e[1]))
+    return sorted(result, key=lambda e: e[1])
 
 
 def _dedupe(records: Iterable[str]) -> list[str]:
@@ -208,11 +229,11 @@ def verify_vless_pool(
     on_stage: Stage | None = None,
     on_progress: ProgressFn | None = None,
     max_workers: int = MAX_WORKERS,
-) -> list[tuple[RelayCandidate, float]]:
-    """Run the full pipeline over vless records; return (raw, parsed, latency) pairs.
+    deduplicate_by_ip: bool = True,
+) -> list[tuple[RelayCandidate, float, str | None]]:
+    """Run the full pipeline over vless records.
 
-    Latency of a survivor is the request time to ``urltest_url`` (default
-    HEALTH_URL).
+    Returns (raw, parsed, latency, egress_ip) tuples.
     """
     candidates = _parse_relay_candidates(_dedupe(records))
     if on_stage is not None:
@@ -253,6 +274,8 @@ def verify_vless_pool(
         on_progress,
         max_workers,
     )
+    if deduplicate_by_ip:
+        results = _dedupe_by_ip(results)
     return results[:limit] if limit is not None else results
 
 
@@ -265,10 +288,11 @@ def verify_proxy_pool(
     on_stage: Stage | None = None,
     on_progress: ProgressFn | None = None,
     max_workers: int = MAX_WORKERS,
-) -> list[tuple[ProxyKey, float]]:
+    deduplicate_by_ip: bool = True,
+) -> list[tuple[ProxyKey, float, str | None]]:
     """TCP-check proxy candidates and probe the survivors.
 
-    Returns (key, latency) pairs, best latency first. Latency is the request
+    Returns (key, latency, egress_ip) pairs, best latency first. Latency is the request
     time to ``urltest_url`` (default HEALTH_URL).
     """
     if on_stage is not None:
@@ -288,13 +312,15 @@ def verify_proxy_pool(
         on_progress,
         max_workers,
     )
+    if deduplicate_by_ip:
+        results = _dedupe_by_ip(results)
     return results[:limit] if limit is not None else results
 
 
 def nodes_from_vless_survivors(
-    survivors: list[tuple[RelayCandidate, float]],
+    survivors: list[tuple[RelayCandidate, float, str | None]],
 ) -> list[Node]:
-    """Turn verified (raw, vnode, latency) pairs into published ALIVE Nodes."""
+    """Turn verified (raw, vnode, latency, egress_ip) pairs into ALIVE Nodes."""
     now = datetime.now()
     return [
         Node(
@@ -305,18 +331,19 @@ def nodes_from_vless_survivors(
             latency_ms=latency,
             priority=i,
             last_check=now,
+            egress_ip=egress_ip,
         )
-        for i, ((raw, _vnode), latency) in enumerate(survivors)
+        for i, ((raw, _vnode), latency, egress_ip) in enumerate(survivors)
     ]
 
 
 def nodes_from_proxy_survivors(
-    survivors: list[tuple[ProxyKey, float]],
+    survivors: list[tuple[ProxyKey, float, str | None]],
 ) -> list[Node]:
-    """Turn verified (protocol, host, port, latency) pairs into ALIVE Nodes."""
+    """Turn verified (key, latency, egress_ip) pairs into ALIVE Nodes."""
     now = datetime.now()
     result = []
-    for i, ((protocol, host, port), latency) in enumerate(survivors):
+    for i, ((protocol, host, port), latency, egress_ip) in enumerate(survivors):
         raw = f"{protocol}://{host}:{port}"
         result.append(
             Node(
@@ -327,6 +354,7 @@ def nodes_from_proxy_survivors(
                 latency_ms=latency,
                 priority=i,
                 last_check=now,
+                egress_ip=egress_ip,
             )
         )
     return result

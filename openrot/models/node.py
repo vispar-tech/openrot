@@ -22,3 +22,4 @@ class Node(BaseModel):
     latency_ms: float | None = None
     fails: int = 0
     last_check: datetime | None = None
+    egress_ip: str | None = None

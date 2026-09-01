@@ -1,3 +1,4 @@
+import contextlib
 import json
 import socket
 import subprocess
@@ -184,16 +185,20 @@ def _wait_for_port(host: str, port: int, timeout: float, step: float = 0.05) -> 
     return False
 
 
+EgressResult = tuple[bool, float | None, str | None]
+
+
 def probe_vless(
     node: VlessNode, singbox_bin: str, timeout: float, url: str | None = None
-) -> tuple[bool, float | None]:
+) -> EgressResult:
     """Probe ``url`` (default HEALTH_URL) through one throwaway sing-box.
 
     Waits until the local listener is up (instead of a fixed sleep); when
     sing-box exits during the wait, its stderr is logged.
 
-    Returns (alive, latency_ms): ``alive`` is True when the node routed the
-    request and got a 2xx response; ``latency_ms`` is the request time in ms.
+    Returns (alive, latency_ms, egress_ip): ``alive`` is True when the node
+    routed the request and got a 2xx response; ``latency_ms`` is the request
+    time in ms; ``egress_ip`` is the public IP seen by the target.
     """
     target = url or HEALTH_URL
     port = _free_port()
@@ -215,7 +220,7 @@ def probe_vless(
                         proc.returncode,
                         stderr_text.strip(),
                     )
-                return False, None
+                return False, None, None
             with httpx.Client(
                 proxy=f"http://127.0.0.1:{port}", timeout=timeout
             ) as client:
@@ -223,11 +228,21 @@ def probe_vless(
                 try:
                     resp = client.get(target)
                 except httpx.HTTPError:
-                    return False, None
+                    return False, None, None
                 if 200 <= resp.status_code < 300:
                     latency = round((time.monotonic() - start) * 1000, 1)
-                    return True, latency
-                return False, None
+                    egress_ip = _get_egress_ip(client)
+                    return True, latency, egress_ip
+                return False, None, None
         finally:
             proc.terminate()
             cfg_path.unlink(missing_ok=True)
+
+
+def _get_egress_ip(client: httpx.Client) -> str | None:
+    """Fetch public IP from api.ipify.org through an existing proxy client."""
+    with contextlib.suppress(Exception):
+        resp = client.get("https://api.ipify.org?format=json", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("ip")
+    return None

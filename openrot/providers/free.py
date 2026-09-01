@@ -1,3 +1,4 @@
+import contextlib
 import time
 from urllib.parse import urlparse
 
@@ -46,11 +47,11 @@ def probe_targets(
     port: int,
     timeout: float = CHECK_TIMEOUT,
     url: str | None = None,
-) -> list[float]:
+) -> tuple[list[float], str | None]:
     """Probe ``url`` (default HEALTH_URL) through the forward proxy.
 
-    Returns [latency] on a 2xx response; empty when the proxy cannot route
-    traffic at all.
+    Returns (latencies, egress_ip) where latencies is [latency] on a 2xx
+    response or [] when the proxy cannot route traffic at all.
     """
     target = url or HEALTH_URL
     start = time.monotonic()
@@ -62,10 +63,21 @@ def probe_targets(
         ) as client:
             resp = client.get(target)
     except httpx.HTTPError:
-        return []
+        return [], None
     if 200 <= resp.status_code < 300:
-        return [round((time.monotonic() - start) * 1000, 1)]
-    return []
+        latency = round((time.monotonic() - start) * 1000, 1)
+        egress_ip = _get_egress_ip(client)
+        return [latency], egress_ip
+    return [], None
+
+
+def _get_egress_ip(client: httpx.Client) -> str | None:
+    """Fetch public IP from api.ipify.org through an existing proxy client."""
+    with contextlib.suppress(Exception):
+        resp = client.get("https://api.ipify.org?format=json", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("ip")
+    return None
 
 
 def fetch_candidates(text: str) -> list[tuple[str, str, int]]:

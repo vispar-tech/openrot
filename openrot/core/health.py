@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from openrot import log
 from openrot.config import Config, Node, NodeProtocol, NodeStatus, Strategy
 from openrot.core import verify
 from openrot.core.singbox import probe_vless
@@ -15,7 +16,10 @@ def check_node(node: Node, cfg: Config) -> tuple[bool, float | None]:
         venode = parse_vless(node.raw)
     except ParseError:
         return False, None
-    return probe_vless(venode, cfg.singbox_bin, cfg.health_timeout)
+    alive, latency, _egress_ip = probe_vless(
+        venode, cfg.singbox_bin, cfg.health_timeout
+    )
+    return alive, latency
 
 
 def test_all(
@@ -29,6 +33,8 @@ def test_all(
     `cfg.fail_threshold`.
     """
     alive_count = 0
+    vless_survivors = []
+    proxy_survivors = []
     vless_nodes = [n for n in cfg.all_nodes() if n.protocol == NodeProtocol.VLESS]
     proxy_nodes = [
         n
@@ -46,10 +52,20 @@ def test_all(
             on_stage=on_stage,
             on_progress=on_progress,
             max_workers=cfg.max_workers,
+            deduplicate_by_ip=cfg.deduplicate_by_ip,
         )
-        okay = {raw: latency for (raw, _vnode), latency in vless_survivors}
+        okay = {
+            raw: (latency, egress_ip)
+            for (raw, _vnode), latency, egress_ip in vless_survivors
+        }
         for node in vless_nodes:
-            alive_count += _apply_result(node, okay.get(node.raw), cfg)
+            entry = okay.get(node.raw)
+            alive_count += _apply_result(
+                node,
+                entry[0] if entry else None,
+                cfg,
+                entry[1] if entry else None,
+            )
 
     if proxy_nodes:
         candidates = free.fetch_candidates("\n".join(n.raw for n in proxy_nodes))
@@ -61,20 +77,37 @@ def test_all(
             on_stage=on_stage,
             on_progress=on_progress,
             max_workers=cfg.max_workers,
+            deduplicate_by_ip=cfg.deduplicate_by_ip,
         )
         proxy_ok = {
-            (proto, host, port): latency
-            for (proto, host, port), latency in proxy_survivors
+            (proto, host, port): (latency, egress_ip)
+            for (proto, host, port), latency, egress_ip in proxy_survivors
         }
         for node in proxy_nodes:
             parsed = free.parse_proxy(node.raw)
-            latency = None if parsed is None else proxy_ok.get(parsed)
-            alive_count += _apply_result(node, latency, cfg)
+            entry = None if parsed is None else proxy_ok.get(parsed)
+            alive_count += _apply_result(
+                node,
+                entry[0] if entry else None,
+                cfg,
+                entry[1] if entry else None,
+            )
+
+    total_input = len(vless_nodes) + len(proxy_nodes)
+    total_output = len(vless_survivors) + len(proxy_survivors)
+    dedup_dropped = total_input - total_output
+    if dedup_dropped > 0:
+        log.get_logger().info("dedup: removed %d duplicate-IP nodes", dedup_dropped)
 
     return alive_count
 
 
-def _apply_result(node: Node, latency: float | None, cfg: Config) -> int:
+def _apply_result(
+    node: Node,
+    latency: float | None,
+    cfg: Config,
+    egress_ip: str | None = None,
+) -> int:
     """Record one health result for a node; return 1 if it survived.
 
     Survivors are marked ALIVE with their latency; everyone else accumulates a
@@ -85,6 +118,8 @@ def _apply_result(node: Node, latency: float | None, cfg: Config) -> int:
         node.status = NodeStatus.ALIVE
         node.latency_ms = latency
         node.fails = 0
+        if egress_ip is not None:
+            node.egress_ip = egress_ip
         return 1
     node.fails += 1
     if node.fails >= cfg.fail_threshold:
