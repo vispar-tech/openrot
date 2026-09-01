@@ -260,14 +260,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             resp, client = forward(cfg_obj, request)
         except UpstreamError as exc:
-            msg = {"error": {"message": str(exc), "type": "upstream"}}
-            payload = json.dumps(msg).encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
+            events.warning("bridge upstream error, rotating and retrying: %s", exc)
+            with contextlib.suppress(SystemExit):
+                cascade.rotate()
+            try:
+                cfg_obj = cfg.load_config()
+                resp, client = forward(cfg_obj, request, rotate_on_429=False)
+            except UpstreamError as retry_exc:
+                msg = {"error": {"message": str(retry_exc), "type": "upstream"}}
+                payload = json.dumps(msg).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
         try:
             _respond(self, resp)
         finally:

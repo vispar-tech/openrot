@@ -79,17 +79,22 @@ def test_fetch_candidates_dedupes() -> None:
 
 def test_probe_targets_records_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(free.httpx, "Client", lambda *a, **k: _FakeClient(_Response()))
-    latencies = free.probe_targets("http", "1.2.3.4", 8080)
+    latencies, egress_ip = free.probe_targets("http", "1.2.3.4", 8080)
     assert len(latencies) == 1
     assert isinstance(latencies[0], float)
+    assert egress_ip is None
 
 
 def test_probe_targets_uses_configured_url(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
     class _RecordingClient:
+        _first = True
+
         def get(self, *a: object, **k: object) -> object:
-            seen["url"] = a[0]
+            if self._first:
+                seen["url"] = a[0]
+                self._first = False
             return _Response()
 
         def __enter__(self) -> Self:
@@ -99,7 +104,7 @@ def test_probe_targets_uses_configured_url(monkeypatch: pytest.MonkeyPatch) -> N
             return False
 
     monkeypatch.setattr(free.httpx, "Client", lambda *a, **k: _RecordingClient())
-    latencies = free.probe_targets(
+    latencies, _ = free.probe_targets(
         "http", "1.2.3.4", 8080, url="https://alt.example/probe"
     )
     assert len(latencies) == 1
@@ -110,7 +115,7 @@ def test_probe_targets_rejects_non_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         free.httpx, "Client", lambda *a, **k: _FakeClient(_BadResponse())
     )
-    assert free.probe_targets("http", "1.2.3.4", 8080) == []
+    assert free.probe_targets("http", "1.2.3.4", 8080) == ([], None)
 
 
 def test_probe_targets_empty_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,7 +124,7 @@ def test_probe_targets_empty_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
         "Client",
         lambda *a, **k: _FakeClient(error=free.httpx.HTTPError("boom")),
     )
-    assert free.probe_targets("http", "1.2.3.4", 8080) == []
+    assert free.probe_targets("http", "1.2.3.4", 8080) == ([], None)
 
 
 def test_check_node_uses_config_health_timeout(

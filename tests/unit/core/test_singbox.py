@@ -136,9 +136,10 @@ def test_probe_vless_waits_for_readiness_then_probes(
     monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: _RunningProc())
     monkeypatch.setattr(sb.httpx, "Client", _FakeClient)
 
-    alive, latency = probe_vless(_vless(), "sing-box", timeout=5.0)
+    alive, latency, egress_ip = probe_vless(_vless(), "sing-box", timeout=5.0)
     assert alive is True
     assert latency is not None
+    assert egress_ip is None
 
 
 def test_probe_vless_logs_stderr_when_singbox_exits(
@@ -166,9 +167,10 @@ def test_probe_vless_logs_stderr_when_singbox_exits(
         )(),
     )
 
-    alive, latency = probe_vless(_vless(), "sing-box", timeout=5.0)
+    alive, latency, egress_ip = probe_vless(_vless(), "sing-box", timeout=5.0)
     assert alive is False
     assert latency is None
+    assert egress_ip is None
     assert len(warnings) == 1
     message, rc = warnings[0][0], warnings[0][1]
     assert "sing-box exited during probe" in message

@@ -38,7 +38,9 @@ def test_verify_progress_reports_each_node(monkeypatch: pytest.MonkeyPatch) -> N
         lambda host, port, timeout: host == "1.1.1.1",
     )
     monkeypatch.setattr(
-        verify.free, "probe_targets", lambda p, h, port, timeout, url=None: [5.0]
+        verify.free,
+        "probe_targets",
+        lambda p, h, port, timeout, url=None: ([5.0], None),
     )
 
     done: list[tuple[object, object, object]] = []
@@ -155,9 +157,9 @@ def test_verify_vless_pool_runs_all_stages(monkeypatch: pytest.MonkeyPatch) -> N
 
     def fake_probe(
         node: object, bin: str, timeout: float, url: str | None = None
-    ) -> list[float]:
+    ) -> tuple[list[float], str | None]:
         probe_calls["n"] += 1
-        return [12.0, 8.0] if probe_calls["n"] == 1 else [30.0]
+        return ([12.0, 8.0], None) if probe_calls["n"] == 1 else ([30.0], None)
 
     monkeypatch.setattr(verify, "_probe_latencies", fake_probe)
 
@@ -174,7 +176,7 @@ def test_verify_vless_pool_runs_all_stages(monkeypatch: pytest.MonkeyPatch) -> N
     assert ("tcp", 1, 2) in stages
     assert ("probe", 1, 1) in stages
     assert len(result) == 1
-    raw, latency = result[0]
+    raw, latency, _egress_ip = result[0]
     assert raw[0] == _RELAY
     assert latency == 10.0  # median of [12.0, 8.0]
 
@@ -187,7 +189,7 @@ def test_verify_vless_pool_fails_low_success_rate(
     monkeypatch.setattr(verify, "singbox_check", lambda n, bin: True)
     # no target reachable -> below the success gate
     monkeypatch.setattr(
-        verify, "_probe_latencies", lambda node, bin, timeout, url=None: []
+        verify, "_probe_latencies", lambda node, bin, timeout, url=None: ([], None)
     )
     assert verify.verify_vless_pool([_RELAY], "sing-box", 3.0) == []
 
@@ -210,7 +212,7 @@ def test_verify_proxy_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         verify.free,
         "probe_targets",
-        lambda p, h, port, timeout, url=None: [5.0],
+        lambda p, h, port, timeout, url=None: ([5.0], None),
     )
 
     stages: list[tuple[object, object, object]] = []
@@ -219,7 +221,7 @@ def test_verify_proxy_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert ("tcp", 1, 2) in stages
     assert ("probe", 1, 1) in stages
-    assert result == [(("http", "1.1.1.1", 80), 5.0)]
+    assert result == [(("http", "1.1.1.1", 80), 5.0, None)]
 
 
 def test_verify_vless_pool_forwards_urltest_url(
@@ -232,9 +234,9 @@ def test_verify_vless_pool_forwards_urltest_url(
 
     def fake_probe(
         node: object, bin: str, timeout: float, url: str | None = None
-    ) -> list[float]:
+    ) -> tuple[list[float], str | None]:
         seen["url"] = url
-        return [7.0]
+        return ([7.0], None)
 
     monkeypatch.setattr(verify, "_probe_latencies", fake_probe)
     result = verify.verify_vless_pool(
@@ -252,9 +254,9 @@ def test_verify_proxy_pool_forwards_urltest_url(
 
     def fake_probe(
         p: str, h: str, port: int, timeout: float, url: str | None = None
-    ) -> list[float]:
+    ) -> tuple[list[float], str | None]:
         seen["url"] = url
-        return [5.0]
+        return ([5.0], None)
 
     monkeypatch.setattr(verify.free, "probe_targets", fake_probe)
     result = verify.verify_proxy_pool(
@@ -267,20 +269,30 @@ def test_verify_proxy_pool_forwards_urltest_url(
 
 
 def test_nodes_from_vless_survivors() -> None:
-    survivors = [((_RELAY, _parsed()), 5.0), ((_RELAY2, _parsed(_RELAY2)), 3.0)]
+    survivors = [
+        ((_RELAY, _parsed()), 5.0, None),
+        ((_RELAY2, _parsed(_RELAY2)), 3.0, "1.2.3.4"),
+    ]
     nodes = verify.nodes_from_vless_survivors(survivors)
     assert isinstance(nodes[0], Node)
     assert nodes[0].status == NodeStatus.ALIVE
     assert nodes[0].latency_ms == 5.0
     assert nodes[1].priority == 1
     assert nodes[0].protocol.value == "vless"
+    assert nodes[0].egress_ip is None
+    assert nodes[1].egress_ip == "1.2.3.4"
 
 
 def test_nodes_from_proxy_survivors() -> None:
-    survivors = [(("http", "1.1.1.1", 80), 7.0), (("socks5", "2.2.2.2", 1080), 3.0)]
+    survivors = [
+        (("http", "1.1.1.1", 80), 7.0, None),
+        (("socks5", "2.2.2.2", 1080), 3.0, "5.6.7.8"),
+    ]
     nodes = verify.nodes_from_proxy_survivors(survivors)
     assert nodes[0].protocol.value == "http"
     assert nodes[1].protocol.value == "socks5"
     assert nodes[0].latency_ms == 7.0
     assert nodes[1].priority == 1
     assert nodes[1].raw == "socks5://2.2.2.2:1080"
+    assert nodes[0].egress_ip is None
+    assert nodes[1].egress_ip == "5.6.7.8"

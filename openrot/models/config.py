@@ -33,6 +33,7 @@ class Config(BaseModel):
     bridge_upstream: str = DEFAULT_BRIDGE_UPSTREAM
     bridge_retry_statuses: list[int] = Field(default_factory=lambda: [429])
     bridge_retry_attempts: int = Field(default=1, ge=0, le=10)
+    deduplicate_by_ip: bool = True
 
     def all_nodes(self) -> list[Node]:
         """Flatten nodes from all profiles into a single list."""

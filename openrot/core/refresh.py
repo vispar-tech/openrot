@@ -51,6 +51,7 @@ def fetch_profile_nodes(
             on_stage=on_stage,
             on_progress=on_progress,
             max_workers=cfg_obj.max_workers,
+            deduplicate_by_ip=cfg_obj.deduplicate_by_ip,
         )
         return verify.nodes_from_proxy_survivors(proxy_survivors)
     records = vless.extract_from_text(text)
@@ -63,6 +64,7 @@ def fetch_profile_nodes(
         on_stage=on_stage,
         on_progress=on_progress,
         max_workers=cfg_obj.max_workers,
+        deduplicate_by_ip=cfg_obj.deduplicate_by_ip,
     )
     return verify.nodes_from_vless_survivors(relay_survivors)
 

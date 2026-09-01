@@ -51,7 +51,7 @@ def test_fetch_profile_nodes_relay(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         refresh.verify,
         "verify_vless_pool",
-        lambda *a, **k: [(("vless://a@1.1.1.1:80", None), 12.0)],
+        lambda *a, **k: [(("vless://a@1.1.1.1:80", None), 12.0, None)],
     )
     result = refresh.fetch_profile_nodes(prof, _cfg_for(prof))
     assert result and result[0].protocol.value == "vless"
@@ -67,7 +67,7 @@ def test_fetch_profile_nodes_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         refresh.verify,
         "verify_proxy_pool",
-        lambda *a, **k: [(("http", "h", 1), 20.0)],
+        lambda *a, **k: [(("http", "h", 1), 20.0, None)],
     )
     result = refresh.fetch_profile_nodes(prof, _cfg_for(prof))
     assert result and result[0].protocol.value == "http"
