@@ -33,6 +33,7 @@ from openrot.core import bridge, cascade, health, proxy, refresh, rotator, verif
 from openrot.core import nodes as node_ops
 from openrot.core import probe as probe_core
 from openrot.providers import warp
+from openrot import opencode
 
 app = typer.Typer(
     help=(
@@ -753,6 +754,20 @@ def config_edit() -> None:
     editor = os.environ.get("EDITOR") or "vim"
     console.print(f"editing {path}")
     subprocess.run([editor, str(path)])  # noqa: S603
+
+
+@app.command("provider")
+def provider_cmd(
+    action: str = typer.Option("auto", help="Action: on, off, or auto (toggle)"),
+    config: str = typer.Option(str(opencode.CONFIG_PATH), "--config", help="Path to opencode.jsonc"),
+) -> None:
+    """Toggle opencode provider in opencode.jsonc."""
+    if action not in ("on", "off", "auto"):
+        console.print("[red]Invalid action: use 'on', 'off', or 'auto'[/red]")
+        raise typer.Exit(code=1)
+    new_state = opencode.toggle(action=action, path=Path(config))
+    status = "[green]enabled[/green]" if new_state else "[red]disabled[/red]"
+    console.print(f"Provider {status}")
 
 
 warp_app = typer.Typer(
