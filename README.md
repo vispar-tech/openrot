@@ -50,7 +50,8 @@ image from GHCR:
 curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install-docker.sh | bash
 ```
 
-> The first method installs the standalone binary to `~/.local/bin/openrot`.
+> The first method installs the standalone binary to `~/.local/lib/openrot`
+> (symlink in `~/.local/bin/openrot`).
 > If your distro already has the prerequisites, you can skip them:
 > `OPENROT_SKIP_WARP=1 ... | bash`.
 
