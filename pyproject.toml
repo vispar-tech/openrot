@@ -12,7 +12,7 @@ dependencies = [
     "typer[all]>=0.12,<0.13",
     "rich>=13.0,<14",
     "pyyaml>=6.0,<7",
-    "pydantic>=2.0,<3",
+    "pydantic>=2.13.5,<3",
     "httpx[socks]>=0.27,<0.28",
     "json5>=0.9,<0.10",
 ]
