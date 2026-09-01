@@ -21,7 +21,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from openrot import __version__, self_update, signals
+from openrot import __version__, opencode, self_update, signals
 from openrot import config as cfg
 from openrot.config import (
     ActiveLevel,
@@ -33,7 +33,6 @@ from openrot.core import bridge, cascade, health, proxy, refresh, rotator, verif
 from openrot.core import nodes as node_ops
 from openrot.core import probe as probe_core
 from openrot.providers import warp
-from openrot import opencode
 
 app = typer.Typer(
     help=(
@@ -759,7 +758,9 @@ def config_edit() -> None:
 @app.command("provider")
 def provider_cmd(
     action: str = typer.Option("auto", help="Action: on, off, or auto (toggle)"),
-    config: str = typer.Option(str(opencode.CONFIG_PATH), "--config", help="Path to opencode.jsonc"),
+    config: str = typer.Option(
+        str(opencode.CONFIG_PATH), "--config", help="Path to opencode.jsonc"
+    ),
 ) -> None:
     """Toggle opencode provider in opencode.jsonc."""
     if action not in ("on", "off", "auto"):
