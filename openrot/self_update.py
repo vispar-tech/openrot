@@ -181,7 +181,7 @@ def _do_update(
         )
 
     version_str = latest_tag.lstrip("v")
-    filename = f"openrot-{version_str}-{_current_os()}-{_current_arch()}.tar.gz"
+    filename = f"openrot-{latest_tag}-{_current_os()}-{_current_arch()}.tar.gz"
     url = f"{DOWNLOAD_BASE}/{latest_tag}/{filename}"
     dest_dir = _bin_dir()
     tmp = tempfile.mkdtemp(prefix="openrot-update-")

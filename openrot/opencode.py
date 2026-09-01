@@ -1,23 +1,26 @@
 """Toggle opencode provider in opencode.jsonc."""
 
+from __future__ import annotations
+
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import json5
 
 CONFIG_PATH = Path.home() / ".config" / "opencode" / "opencode.jsonc"
-OPENCODE_PROVIDER: dict = {"options": {"baseURL": "http://127.0.0.1:7891/v1"}}
+OPENCODE_PROVIDER: dict[str, Any] = {"options": {"baseURL": "http://127.0.0.1:7891/v1"}}
 SCHEMA = "https://opencode.ai/config.json"
 
 
-def _read(path: Path) -> dict:
+def _read(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"$schema": SCHEMA}
     return json5.loads(path.read_text())
 
 
-def _write(data: dict, path: Path) -> None:
+def _write(data: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent="\t", ensure_ascii=False) + "\n")
 
@@ -27,7 +30,8 @@ def _backup(path: Path) -> None:
         shutil.copy2(path, path.with_suffix(".jsonc.bak"))
 
 
-def is_enabled(data: dict) -> bool:
+def is_enabled(data: dict[str, Any]) -> bool:
+    """Check if opencode provider is enabled in config."""
     return "opencode" in data.get("provider", {})
 
 
