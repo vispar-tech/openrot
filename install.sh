@@ -27,6 +27,7 @@ die()  { printf '\033[31m[openrot]\033[0m %s\n' "$*" >&2; exit 1; }
 macos() { [ "$(uname -s)" = "Darwin" ]; }
 linux() { [ "$(uname -s)" = "Linux" ]; }
 
+lib_dir="$PREFIX/lib/openrot"
 bin_dir="$PREFIX/bin"
 URL_BASE="${BIN_URL:-https://github.com/vispar-tech/openrot/releases/download/$VERSION}"
 
@@ -121,15 +122,18 @@ download_binary() {
     if [ -d "$tmp/openrot" ] && [ -x "$tmp/openrot/openrot" ]; then
         src="$tmp/openrot"
     fi
-    mkdir -p "$bin_dir"
-    install -m 0755 "$src/openrot" "$bin_dir/openrot"
+    mkdir -p "$lib_dir"
+    install -m 0755 "$src/openrot" "$lib_dir/openrot"
     if [ -d "$src/_internal" ]; then
-        rm -rf "$bin_dir/_internal"
-        cp -R "$src/_internal" "$bin_dir/_internal"
-        chmod -R u+rwX,go+rX "$bin_dir/_internal"
+        rm -rf "$lib_dir/_internal"
+        cp -R "$src/_internal" "$lib_dir/_internal"
+        chmod -R u+rwX,go+rX "$lib_dir/_internal"
     fi
     rm -rf "$tmp"
-    say "Installed openrot to $bin_dir/openrot"
+    # Symlink binary into ~/.local/bin/
+    mkdir -p "$bin_dir"
+    ln -sf "../lib/openrot/openrot" "$bin_dir/openrot"
+    say "Installed openrot to $lib_dir/openrot"
     if ! echo "$PATH" | grep -q "$bin_dir"; then
         warn "Add $bin_dir to your PATH:"
         if macos; then
@@ -162,7 +166,7 @@ main() {
     start_warp
     check_singbox
     download_binary
-    "$bin_dir/openrot" --version
+    "$lib_dir/openrot" --version
     say "Done. Run 'openrot --help' to get started."
 }
 
