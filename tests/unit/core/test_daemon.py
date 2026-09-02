@@ -213,9 +213,7 @@ def test_stop_and_wait_terminates_and_waits(
     assert call_count == 3
 
 
-def test_stop_and_wait_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stop_and_wait_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pid_file = tmp_path / "bridge.pid"
     pid_file.write_text("42\n")
     monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 42)
