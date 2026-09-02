@@ -388,6 +388,62 @@ def test_serve_warns_when_binding_beyond_loopback(
     assert any("SECURITY" in msg for msg in printed)
 
 
+class _FakeStdout:
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeServer:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    printed: list[str] = []
+    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
+    monkeypatch.setattr(bridge, "Bridge", FakeServer)
+
+    bridge.serve()
+
+    assert not any("Ctrl-C to stop." in msg for msg in printed)
+
+
+def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeServer:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    printed: list[str] = []
+    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
+    monkeypatch.setattr(bridge, "Bridge", FakeServer)
+
+    bridge.serve()
+
+    assert any("Ctrl-C to stop." in msg for msg in printed)
+
+
 def test_respond_streams_body_and_skips_hop_by_hop() -> None:
     from io import BytesIO
     from types import SimpleNamespace
