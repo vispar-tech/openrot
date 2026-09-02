@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import socket
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -220,7 +221,8 @@ def serve() -> None:
         f"bridge: [green]listening[/green] on {url} "
         f"(upstream {cfg_obj.bridge_upstream}, level {cfg_obj.active_level.value})"
     )
-    console.print("Ctrl-C to stop.")
+    if sys.stdout.isatty():
+        console.print("Ctrl-C to stop.")
     host = cfg.listen_address()
     warn_if_exposed(host)
     signals.keyboard_on_sigterm()
