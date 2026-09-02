@@ -46,6 +46,21 @@ def test_connect_sets_proxy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ("proxy", "port", str(w.WARP_PROXY_PORT)) in calls
 
 
+def test_connect_does_not_use_rich_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch(monkeypatch, [w.WarpStatus.CONNECTED])
+
+    def exploding_status(*args: object, **kwargs: object) -> object:
+        raise AssertionError("connect() must not start a rich Live")
+
+    monkeypatch.setattr(w.console, "status", exploding_status)
+    printed: list[str] = []
+
+    monkeypatch.setattr(w.console, "print", lambda *a, **k: printed.append(a[0]))
+
+    assert w.connect() is True
+    assert "waiting for WARP connection..." in printed
+
+
 def test_proxy_address_default() -> None:
     assert w.proxy_address() == (w.WARP_PROXY_HOST, w.WARP_PROXY_PORT)
 

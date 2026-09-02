@@ -87,11 +87,11 @@ def connect() -> bool:
     _run("mode", "proxy")
     _run("proxy", "port", str(port))
     _run("connect")
-    with console.status("waiting for WARP connection..."):
-        for _ in range(120):
-            if is_connected():
-                return True
-            time.sleep(0.5)
+    console.print("waiting for WARP connection...")
+    for _ in range(120):
+        if is_connected():
+            return True
+        time.sleep(0.5)
     return False
 
 
