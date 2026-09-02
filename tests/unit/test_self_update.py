@@ -192,3 +192,81 @@ class TestUpdateResult:
         assert r.latest == "2.0.0"
         assert r.updated is True
         assert r.message == "ok"
+
+
+class TestServiceState:
+    def test_fields(self) -> None:
+        s = su.ServiceState(daemon_running=True, proxy_running=False)
+        assert s.daemon_running is True
+        assert s.proxy_running is False
+
+
+class TestCheckServices:
+    def test_nothing_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: None)
+        monkeypatch.setattr(su.proxy, "load_pid", lambda _: None)
+        state = su._check_services()
+        assert state.daemon_running is False
+        assert state.proxy_running is False
+
+    def test_daemon_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: 123)
+        monkeypatch.setattr(su.proxy, "load_pid", lambda _: None)
+        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        state = su._check_services()
+        assert state.daemon_running is True
+        assert state.proxy_running is False
+
+    def test_proxy_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: None)
+        monkeypatch.setattr(su.proxy, "load_pid", lambda _: 456)
+        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        state = su._check_services()
+        assert state.daemon_running is False
+        assert state.proxy_running is True
+
+    def test_both_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: 123)
+        monkeypatch.setattr(su.proxy, "load_pid", lambda _: 456)
+        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        state = su._check_services()
+        assert state.daemon_running is True
+        assert state.proxy_running is True
+
+
+class TestStopServices:
+    def test_stops_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stopped: list[str] = []
+        monkeypatch.setattr(
+            su.proxy, "stop_proxy", lambda: stopped.append("proxy") or True
+        )
+        monkeypatch.setattr(
+            su.daemon,
+            "stop_and_wait",
+            lambda p: stopped.append(str(p)) or True,
+        )
+        su._stop_services()
+        assert "proxy" in stopped
+        assert len(stopped) == 3  # proxy + daemon PID + bridge PID
+
+
+class TestRestartServices:
+    def test_restarts_daemon(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[str] = []
+        monkeypatch.setattr(
+            su.daemon,
+            "daemon_start_background",
+            lambda name, pid, log: started.append(name),
+        )
+        su._restart_services(su.ServiceState(daemon_running=True, proxy_running=False))
+        assert started == ["cascade"]
+
+    def test_no_restart_when_not_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[str] = []
+        monkeypatch.setattr(
+            su.daemon,
+            "daemon_start_background",
+            lambda name, pid, log: started.append(name),
+        )
+        su._restart_services(su.ServiceState(daemon_running=False, proxy_running=False))
+        assert started == []

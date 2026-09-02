@@ -14,10 +14,42 @@ from typing import NamedTuple
 import httpx
 
 from openrot import __version__
+from openrot import config as cfg
+from openrot.core import daemon, proxy
 
 GH_REPO = "vispar-tech/openrot"
 RELEASE_URL = f"https://api.github.com/repos/{GH_REPO}/releases/latest"
 DOWNLOAD_BASE = f"https://github.com/{GH_REPO}/releases/download"
+
+
+class ServiceState(NamedTuple):
+    """Tracks whether openrot daemon/proxy were running before an update."""
+
+    daemon_running: bool
+    proxy_running: bool
+
+
+def _check_services() -> ServiceState:
+    """Check if any openrot daemon/proxy processes are currently running."""
+    daemon_pid = daemon.load_daemon_pid(cfg.DAEMON_PID_PATH)
+    proxy_pid = proxy.load_pid(cfg.PID_PATH)
+    return ServiceState(
+        daemon_running=daemon_pid is not None and proxy.is_running(daemon_pid),
+        proxy_running=proxy_pid is not None and proxy.is_running(proxy_pid),
+    )
+
+
+def _stop_services() -> None:
+    """Stop all openrot daemon and proxy processes gracefully."""
+    proxy.stop_proxy()
+    daemon.stop_and_wait(cfg.DAEMON_PID_PATH)
+    daemon.stop_and_wait(cfg.BRIDGE_PID_PATH)
+
+
+def _restart_services(state: ServiceState) -> None:
+    """Restart openrot services that were running before the update."""
+    if state.daemon_running:
+        daemon.daemon_start_background("cascade", cfg.DAEMON_PID_PATH, cfg.LOG_PATH)
 
 
 class UpdateResult(NamedTuple):
@@ -113,6 +145,9 @@ def perform_update(
     progress_fn: object | None = None,
 ) -> UpdateResult:
     """Download and install the latest release, replacing the current binary."""
+    state = _check_services()
+    if state.daemon_running or state.proxy_running:
+        _stop_services()
     close = client is None
     if client is None:
         client = httpx.Client(follow_redirects=True)
@@ -121,6 +156,7 @@ def perform_update(
     finally:
         if close:
             client.close()
+        _restart_services(state)
 
 
 def _download_archive(

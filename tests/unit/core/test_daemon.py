@@ -186,3 +186,58 @@ def test_stop_returns_false_when_kill_raises(
     monkeypatch.setattr(daemon.os, "kill", boom)
     assert daemon.stop(pid_file) is False
     assert pid_file.exists()
+
+
+def test_stop_and_wait_terminates_and_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killed: list[tuple[int, int]] = []
+    pid_file = tmp_path / "bridge.pid"
+    pid_file.write_text("42\n")
+    call_count = 0
+
+    def mock_is_running(pid: int) -> bool:
+        nonlocal call_count
+        call_count += 1
+        # First two calls: still running; third call: dead
+        return call_count < 3
+
+    monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 42)
+    monkeypatch.setattr(daemon, "is_running", mock_is_running)
+    monkeypatch.setattr(daemon.os, "kill", lambda *a: killed.append(a))
+    monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
+
+    assert daemon.stop_and_wait(pid_file) is True
+    assert killed == [(42, daemon.signal.SIGTERM)]
+    assert not pid_file.exists()
+    assert call_count == 3
+
+
+def test_stop_and_wait_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "bridge.pid"
+    pid_file.write_text("42\n")
+    monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 42)
+    monkeypatch.setattr(daemon, "is_running", lambda pid: True)
+    monkeypatch.setattr(daemon.os, "kill", lambda *a: None)
+    monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
+
+    assert daemon.stop_and_wait(pid_file) is False
+
+
+def test_stop_and_wait_noop_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: None)
+    assert daemon.stop_and_wait(tmp_path / "nope.pid") is False
+
+
+def test_stop_and_wait_noop_when_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "bridge.pid"
+    pid_file.write_text("999999\n")
+    monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 999999)
+    monkeypatch.setattr(daemon, "is_running", lambda pid: False)
+    assert daemon.stop_and_wait(pid_file) is False
