@@ -53,12 +53,11 @@ def test_connect_does_not_use_rich_live(monkeypatch: pytest.MonkeyPatch) -> None
         raise AssertionError("connect() must not start a rich Live")
 
     monkeypatch.setattr(w.console, "status", exploding_status)
-    printed: list[str] = []
-
-    monkeypatch.setattr(w.console, "print", lambda *a, **k: printed.append(a[0]))
+    logged: list[str] = []
+    monkeypatch.setattr(w.events, "info", lambda msg, *a: logged.append(msg % a))
 
     assert w.connect() is True
-    assert "waiting for WARP connection..." in printed
+    assert any("waiting for WARP" in m for m in logged)
 
 
 def test_proxy_address_default() -> None:
