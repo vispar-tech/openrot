@@ -31,8 +31,6 @@ def daemonize() -> None:
     daemon.start(
         name="cascade",
         pid_path=cfg.DAEMON_PID_PATH,
-        log_path=cfg.LOG_PATH,
-        rotate_log=True,
     )
 
 
@@ -88,14 +86,13 @@ def start_warp(foreground: bool) -> bool:
     """Connect WARP in proxy mode and front it with the local mixed proxy."""
     cfg_obj = cfg.load_config()
     if not cfg_obj.warp_enabled:
-        console.print("[yellow]warp disabled in config, using node chain[/yellow]")
+        events.info("warp disabled in config, using node chain")
         return False
     if not warp.is_installed():
-        console.print("WARP: available on host only (not found). Skipping.")
+        events.info("WARP: available on host only (not found). Skipping.")
         return False
     if not warp.connect():
         events.warning("warp connect failed; falling back to node chain")
-        console.print("[red][warp] failed to connect, falling back to node chain[/red]")
         return False
 
     w_host, w_port = warp.proxy_address()
@@ -105,32 +102,23 @@ def start_warp(foreground: bool) -> bool:
         )
     except FileNotFoundError:
         events.warning(
-            "warp in proxy mode: sing-box not found (%s)", cfg_obj.singbox_bin
-        )
-        console.print(
-            f"[red]sing-box not found[/red] (looked for '{cfg_obj.singbox_bin}'). "
-            "Install it: brew install sing-box"
+            "sing-box not found (%s). Install it: brew install sing-box",
+            cfg_obj.singbox_bin,
         )
         return False
     except RuntimeError as exc:
         events.warning("warp listener failed to start: %s", exc)
-        console.print(f"[red]{exc}[/red]")
         return False
     proxy.save_pid(pid)
     cfg_obj.active_level = ActiveLevel.WARP
     cfg.save_config(cfg_obj)
     ip = warp.current_ip()
-    suffix = f" (IP {ip})" if ip else ""
     events.info(
         "warp active in proxy mode (127.0.0.1:%d -> socks5://%s:%d, ip=%s)",
         cfg_obj.port,
         w_host,
         w_port,
         ip or "-",
-    )
-    console.print(
-        f"[warp] active via 127.0.0.1:{cfg_obj.port} → "
-        f"socks5://{w_host}:{w_port}{suffix}"
     )
     if foreground:
         warp_health_loop()
@@ -141,24 +129,19 @@ def start_node(foreground: bool) -> None:
     """Start the node chain: pick from profiles by priority."""
     cfg_obj = cfg.load_config()
     if not cfg_obj.all_nodes():
-        console.print(
-            "[red]no nodes configured. Add a profile via 'openrot profile add'[/red]"
-        )
+        events.warning("no nodes configured. Add a profile via 'openrot profile add'")
         raise SystemExit(1)
 
     if not any(n.status == NodeStatus.ALIVE for n in cfg_obj.all_nodes()):
-        console.print(
-            "[yellow]node: no alive node yet, running health check...[/yellow]"
-        )
+        events.info("node: no alive node yet, running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         cfg.save_config(cfg_obj)
 
     node = rotator.pick(cfg_obj)
     if node is None:
-        console.print(
-            "[red][node] no alive node available. Run 'openrot test' or "
-            "'openrot update'[/red]"
+        events.warning(
+            "no alive node available. Run 'openrot test' or 'openrot update'"
         )
         raise SystemExit(1)
 
@@ -167,13 +150,13 @@ def start_node(foreground: bool) -> None:
     try:
         pid = launch(cfg_obj, node)
     except FileNotFoundError:
-        console.print(
-            f"[red]sing-box not found[/red] (looked for '{cfg_obj.singbox_bin}'). "
-            "Install it: brew install sing-box"
+        events.warning(
+            "sing-box not found (%s). Install it: brew install sing-box",
+            cfg_obj.singbox_bin,
         )
         raise SystemExit(1) from None
     except RuntimeError as exc:
-        console.print(f"[red]{exc}[/red]")
+        events.warning("%s", exc)
         raise SystemExit(1) from exc
 
     if foreground:
@@ -184,7 +167,7 @@ def start_node(foreground: bool) -> None:
         node_health_loop()
         return
 
-    console.print(f"Proxy started, pid {pid}, 127.0.0.1:{cfg_obj.port}")
+    events.info("proxy started, pid %d, 127.0.0.1:%d", pid, cfg_obj.port)
 
 
 def _commit_health(fresh: cfg.Config, node_id: str, alive: bool) -> tuple[bool, int]:
@@ -215,10 +198,6 @@ def node_health_loop() -> None:
         if current is None:
             if snapshot.active_level == ActiveLevel.NODE:
                 events.warning("current node no longer in the pool, rotating")
-                console.print(
-                    "[yellow][node] current node no longer in the pool, "
-                    "rotating[/yellow]"
-                )
                 with contextlib.suppress(SystemExit):
                     rotate()
             continue
@@ -229,9 +208,6 @@ def node_health_loop() -> None:
         ) or (False, 0)
         if reached:
             label = nodes.node_label(current)
-            console.print(
-                f"[yellow]node {label} failed {fails} times, rotating[/yellow]"
-            )
             events.warning("node %s failed %d times, rotating", label, fails)
             with contextlib.suppress(SystemExit):
                 rotate()
@@ -245,7 +221,6 @@ def warp_health_loop() -> None:
         if warp.is_connected():
             continue
         events.warning("warp dropped; falling back to node chain")
-        console.print("[yellow][warp] dropped, falling back to node chain[/yellow]")
         proxy.stop_proxy()
         start_node(True)
         return
@@ -275,11 +250,8 @@ def _rotate_inner(first: bool) -> None:
         if warp.rotate():
             ip = warp.current_ip()
             events.info("warp rotated, ip=%s", ip or "-")
-            suffix = f" (IP {ip})" if ip else ""
-            console.print(f"[warp] Rotated WARP{suffix}")
         else:
             events.warning("warp rotation failed")
-            console.print("[red][warp] WARP rotation failed[/red]")
         return
 
     current = nodes.current_node(cfg_obj)
@@ -288,7 +260,7 @@ def _rotate_inner(first: bool) -> None:
     cfg_obj.current_node_id = None
 
     if not any(n.status == NodeStatus.ALIVE for n in cfg_obj.all_nodes()):
-        console.print("[yellow]node: no alive node, running health check...[/yellow]")
+        events.info("node: no alive node, running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         cfg.save_config(cfg_obj)
@@ -301,9 +273,7 @@ def _rotate_inner(first: bool) -> None:
     else:
         node = rotator.next_node(cfg_obj, current_id)
     if node is None:
-        console.print(
-            "[yellow]node: no alive alternative, re-running health check...[/yellow]"
-        )
+        events.info("node: no alive alternative, re-running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         node = (
@@ -314,22 +284,14 @@ def _rotate_inner(first: bool) -> None:
         cfg.save_config(cfg_obj)
     if node is None:
         events.warning("rotation failed: no alive node available")
-        console.print("[red][node] no alive node available[/red]")
         raise SystemExit(1)
 
     try:
         pid = launch(cfg_obj, node)
     except RuntimeError as exc:
-        console.print(f"[red]{exc}[/red]")
+        events.warning("%s", exc)
         raise SystemExit(1) from exc
     events.info("rotated to node %s (pid %d)", nodes.node_label(node), pid)
-    idx = rotator.index_of(cfg_obj, node)
-    total = len(rotator.chain(cfg_obj))
-    pos = f", {idx}/{total}" if idx is not None else ""
-    console.print(
-        f"[node] rotated to {nodes.node_label(node)}, pid {pid}, "
-        f"127.0.0.1:{cfg_obj.port}{pos}"
-    )
 
 
 def stop() -> None:

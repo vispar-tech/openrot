@@ -27,11 +27,9 @@ from openrot.models import (
 )
 
 __all__ = [
-    "BRIDGE_LOG_PATH",
     "BRIDGE_PID_PATH",
     "CONFIG_PATH",
     "DAEMON_PID_PATH",
-    "EVENT_LOG_PATH",
     "LOG_PATH",
     "PID_PATH",
     "TOP_LIMIT",
@@ -81,25 +79,15 @@ def _bridge_pid_path() -> Path:
     return _base_dir() / "openrot-bridge.daemon.pid"
 
 
-def _bridge_log_path() -> Path:
-    return _base_dir() / "openrot-bridge.log"
-
-
 def _log_path() -> Path:
     return _base_dir() / "openrot.log"
-
-
-def _event_log_path() -> Path:
-    return _base_dir() / "openrot-events.log"
 
 
 CONFIG_PATH = _config_path()
 PID_PATH = _pid_path()
 DAEMON_PID_PATH = _daemon_pid_path()
 BRIDGE_PID_PATH = _bridge_pid_path()
-BRIDGE_LOG_PATH = _bridge_log_path()
 LOG_PATH = _log_path()
-EVENT_LOG_PATH = _event_log_path()
 
 
 def _lock_for(path: Path) -> Path:

@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from openrot.core import daemon
-from openrot.log import rotate_if_large
 
 
 def test_command_uses_python(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,19 +40,15 @@ def test_start_forks_detached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: None)
     monkeypatch.setattr(daemon, "save_daemon_pid", lambda pid, path=None: None)
 
-    log = tmp_path / "openrot.log"
     daemon.start(
         name="cascade",
         pid_path=tmp_path / "openrot.daemon.pid",
-        log_path=log,
-        rotate_log=True,
     )
 
     cmd = calls["cmd"]
     assert isinstance(cmd, list) and cmd[-2:] == ["start", "cascade"]
     kwargs = calls["kwargs"]
     assert isinstance(kwargs, dict) and kwargs.get("start_new_session") is True
-    assert log.exists() and log.stat().st_mode & 0o777 == 0o600
 
 
 def test_start_frozen_reuses_binary(
@@ -75,9 +70,7 @@ def test_start_frozen_reuses_binary(
     monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: None)
     monkeypatch.setattr(daemon, "save_daemon_pid", lambda pid, path=None: None)
 
-    daemon.start(
-        name="bridge", pid_path=tmp_path / "b.pid", log_path=tmp_path / "b.log"
-    )
+    daemon.start(name="bridge", pid_path=tmp_path / "b.pid")
 
     assert calls["cmd"] == ["/usr/local/bin/openrot", "start", "bridge"]
 
@@ -99,9 +92,7 @@ def test_start_wont_duplicate_live_daemon(
     monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 1234)
     monkeypatch.setattr(daemon, "is_running", lambda pid: True)
 
-    daemon.start(
-        name="cascade", pid_path=tmp_path / "c.pid", log_path=tmp_path / "c.log"
-    )
+    daemon.start(name="cascade", pid_path=tmp_path / "c.pid")
 
     assert called["n"] == 0
 
@@ -126,22 +117,10 @@ def test_start_clears_stale_pid_and_restarts(
     monkeypatch.setattr(daemon, "is_running", lambda pid: False)
     monkeypatch.setattr(daemon, "save_daemon_pid", lambda pid, path=None: None)
 
-    daemon.start(name="cascade", pid_path=pid_file, log_path=tmp_path / "c.log")
+    daemon.start(name="cascade", pid_path=pid_file)
 
     assert "cmd" in calls
     assert not pid_file.exists()
-
-
-def test_rotate_if_large(tmp_path: Path) -> None:
-    big = tmp_path / "openrot.log"
-    big.write_text("x" * 1_500_000)
-    rotate_if_large(big)
-    assert (tmp_path / "openrot.log.1").exists()
-
-    small = tmp_path / "small.log"
-    small.write_text("hi")
-    rotate_if_large(small)
-    assert not (tmp_path / "small.log.1").exists()
 
 
 def test_stop_terminates_and_removes_pid(
@@ -199,7 +178,6 @@ def test_stop_and_wait_terminates_and_waits(
     def mock_is_running(pid: int) -> bool:
         nonlocal call_count
         call_count += 1
-        # First two calls: still running; third call: dead
         return call_count < 3
 
     monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: 42)

@@ -256,7 +256,7 @@ class TestRestartServices:
         monkeypatch.setattr(
             su.daemon,
             "daemon_start_background",
-            lambda name, pid, log: started.append(name),
+            lambda name, pid: started.append(name),
         )
         su._restart_services(su.ServiceState(daemon_running=True, proxy_running=False))
         assert started == ["cascade"]
@@ -266,7 +266,7 @@ class TestRestartServices:
         monkeypatch.setattr(
             su.daemon,
             "daemon_start_background",
-            lambda name, pid, log: started.append(name),
+            lambda name, pid: started.append(name),
         )
         su._restart_services(su.ServiceState(daemon_running=False, proxy_running=False))
         assert started == []

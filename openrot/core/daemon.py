@@ -1,9 +1,8 @@
 """Shared daemon lifecycle: re-run a ``start <command>`` loop detached.
 
 Both ``cascade`` and ``bridge`` daemonize the same way — fork a background
-process detached from the terminal, route its output to a log file, remember
-the pid, and terminate it on demand — and only differ in the subcommand name
-and the pid/log paths. This module is that common implementation.
+process detached from the terminal, remember the pid, and terminate it on
+demand — and only differ in the subcommand name and the pid path.
 """
 
 import os
@@ -16,7 +15,6 @@ from pathlib import Path
 from rich.console import Console
 
 from openrot.core.proxy import is_running, load_daemon_pid, save_daemon_pid
-from openrot.log import rotate_if_large
 
 console = Console()
 
@@ -28,18 +26,12 @@ def command(subcommand: str) -> list[str]:
     return [sys.executable, "-m", "openrot", "start", subcommand]
 
 
-def start(
-    *,
-    name: str,
-    pid_path: Path,
-    log_path: Path,
-    rotate_log: bool = False,
-) -> None:
+def start(*, name: str, pid_path: Path) -> None:
     """Fork the ``start <name>`` loop into a background daemon process.
 
     Refuses to start while the recorded pid is still alive; otherwise writes
-    the fresh pid to ``pid_path`` and routes the daemon's output to
-    ``log_path`` (rotating it first when requested).
+    the fresh pid to ``pid_path``. Output goes through the events logger
+    (timestamped) rather than being captured to a raw file.
     """
     existing = load_daemon_pid(pid_path)
     if existing is not None:
@@ -47,18 +39,12 @@ def start(
             console.print(f"[yellow]{name} daemon already running[/yellow]")
             return
         pid_path.unlink(missing_ok=True)
-    if rotate_log:
-        rotate_if_large(log_path)
-    with log_path.open("ab") as log_f:
-        log_path.chmod(0o600)
-        proc = subprocess.Popen(  # noqa: S603
-            command(name),
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    proc = subprocess.Popen(  # noqa: S603
+        command(name),
+        start_new_session=True,
+    )
     save_daemon_pid(proc.pid, path=pid_path)
-    console.print(f"{name} daemon started (pid {proc.pid}), log: {log_path}")
+    console.print(f"{name} daemon started (pid {proc.pid})")
 
 
 def stop(pid_path: Path) -> bool:
@@ -94,14 +80,10 @@ def stop_and_wait(pid_path: Path) -> bool:
     return False
 
 
-def daemon_start_background(name: str, pid_path: Path, log_path: Path) -> None:
+def daemon_start_background(name: str, pid_path: Path) -> None:
     """Start a daemon in a detached background process (for restart after update)."""
-    with log_path.open("ab") as log_f:
-        log_path.chmod(0o600)
-        proc = subprocess.Popen(  # noqa: S603
-            command(name),
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    proc = subprocess.Popen(  # noqa: S603
+        command(name),
+        start_new_session=True,
+    )
     save_daemon_pid(proc.pid, path=pid_path)

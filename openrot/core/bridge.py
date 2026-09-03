@@ -28,15 +28,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin
 
 import httpx
+from rich.console import Console
 
 from openrot import config as cfg
 from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
-from openrot.log import get_logger
+from openrot.log import console_echo
+from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
-events = get_logger()
+events = _get_logger()
+console = Console()
 
 
 def _log(msg: str) -> None:
@@ -218,6 +221,7 @@ def serve() -> None:
     point any OpenAI-compatible client at the loopback URL and watch it route
     through the cascade with 429 self-rotation. Ctrl-C stops it.
     """
+    console_echo()
     cfg_obj = cfg.load_config()
     if not _running_level(cfg_obj, cascade.level_serving):
         _log("no active level, starting cascade...")
@@ -230,7 +234,7 @@ def serve() -> None:
         f"(upstream {cfg_obj.bridge_upstream}, level {cfg_obj.active_level.value})"
     )
     if sys.stdout.isatty():
-        _log("Ctrl-C to stop.")
+        console.print("[dim]Ctrl-C to stop.[/dim]")
     host = cfg.listen_address()
     warn_if_exposed(host)
     signals.keyboard_on_sigterm()
@@ -238,7 +242,7 @@ def serve() -> None:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        _log("\nstopping bridge...")
+        console.print("[dim]stopping bridge...[/dim]")
     finally:
         server.server_close()
 
@@ -248,7 +252,6 @@ def daemonize() -> None:
     daemon.start(
         name="bridge",
         pid_path=cfg.BRIDGE_PID_PATH,
-        log_path=cfg.BRIDGE_LOG_PATH,
     )
 
 
@@ -271,14 +274,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         prompt_chars = getattr(self, "_prompt_chars", 0)
         if prompt_chars:
             parts.append(
-                f"prompt={prompt_chars / 1000:.1f}k"
+                f"input={prompt_chars / 1000:.1f}k"
                 if prompt_chars >= 1000
-                else f"prompt={prompt_chars}"
+                else f"input={prompt_chars}"
+            )
+        output_chars = getattr(self, "_output_chars", 0)
+        if output_chars:
+            parts.append(
+                f"output={output_chars / 1000:.1f}k"
+                if output_chars >= 1000
+                else f"output={output_chars}"
             )
         if elapsed_s >= 1:
-            parts.append(f"{elapsed_s:.1f}s")
+            parts.append(f"time={elapsed_s:.1f}s")
         else:
-            parts.append(f"{self._elapsed_ms:.0f}ms")
+            parts.append(f"time={self._elapsed_ms:.0f}ms")
         _log(f"[bridge] {' '.join(parts)}")
 
     def _handle(self, method: str) -> None:
@@ -320,6 +330,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 resp, client = forward(cfg_obj, request, rotate_on_429=False)
             except UpstreamError as retry_exc:
                 self._elapsed_ms = (time.monotonic() - t0) * 1000
+                self._output_chars = 0
                 self._log_request_console(method)
                 msg = {"error": {"message": str(retry_exc), "type": "upstream"}}
                 payload = json.dumps(msg).encode()
@@ -329,6 +340,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(payload)
                 return
+        self._output_chars = int(resp.headers.get("content-length", 0) or 0)
         try:
             _respond(self, resp)
         finally:
@@ -357,29 +369,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: D102
         self._handle("HEAD")
 
-    def log_message(self, fmt: str, *args: object) -> None:
-        """Log a request line to the events log."""
-        parts = [fmt % args]
-
-        model = getattr(self, "_model", "")
-        if model:
-            parts.append(f"model={model}")
-
-        prompt_chars = getattr(self, "_prompt_chars", 0)
-        if prompt_chars:
-            if prompt_chars >= 1000:
-                parts.append(f"prompt={prompt_chars / 1000:.1f}k")
-            else:
-                parts.append(f"prompt={prompt_chars}")
-
-        elapsed = getattr(self, "_elapsed_ms", 0)
-        if elapsed:
-            if elapsed >= 1000:
-                parts.append(f"{elapsed / 1000:.1f}s")
-            else:
-                parts.append(f"{elapsed:.0f}ms")
-
-        events.info("bridge %s", " ".join(parts))
+    def log_message(self, format: str, *args: object) -> None:
+        """No-op: request logging handled by _log_request_console."""
 
 
 class Bridge(ThreadingHTTPServer):

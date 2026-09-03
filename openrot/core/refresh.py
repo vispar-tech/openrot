@@ -6,12 +6,14 @@ from functools import partial
 from rich.console import Console
 
 from openrot import config as cfg
+from openrot import log
 from openrot.config import Config, Profile, ProfileKind
 from openrot.core import nodes, verify
 from openrot.core.verify import Stage
 from openrot.providers import free, vless
 
 console = Console()
+events = log.get_logger()
 
 
 def refresh_profile(
@@ -122,5 +124,5 @@ def run_scheduler() -> None:
             )
 
         for name, err in errors.items():
-            console.print(f"[yellow][{name}] refresh failed: {err}[/yellow]")
+            events.warning("[%s] refresh failed: %s", name, err)
         time.sleep(_tick_interval(cfg.load_config()))

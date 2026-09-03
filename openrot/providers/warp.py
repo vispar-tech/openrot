@@ -7,12 +7,15 @@ from enum import StrEnum
 import httpx
 from rich.console import Console
 
+from openrot import log
+
 WARP_BIN = "warp-cli"
 WARP_PROXY_HOST = "127.0.0.1"
 WARP_PROXY_PORT = 40000
 IPIFY_URL = "https://api.ipify.org?format=json"
 
 console = Console()
+events = log.get_logger()
 
 
 class WarpStatus(StrEnum):
@@ -82,12 +85,12 @@ def connect() -> bool:
     """Bring WARP up in proxy mode and wait until it reports connected."""
     if not is_installed():
         return False
-    console.print("warp: connecting (proxy mode)...")
+    events.info("warp: connecting (proxy mode)...")
     _, port = proxy_address()
     _run("mode", "proxy")
     _run("proxy", "port", str(port))
     _run("connect")
-    console.print("waiting for WARP connection...")
+    events.info("waiting for WARP connection...")
     for _ in range(120):
         if is_connected():
             return True
