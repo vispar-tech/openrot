@@ -21,6 +21,7 @@ import contextlib
 import json
 import socket
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -257,8 +258,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _handle(self, method: str) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
+
+        model = ""
+        prompt_chars = 0
+        if body:
+            try:
+                parsed = json.loads(body)
+                model = parsed.get("model", "")
+                messages = parsed.get("messages", [])
+                if isinstance(messages, list):
+                    prompt_chars = sum(
+                        len(m.get("content", "")) if isinstance(m, dict) else 0
+                        for m in messages
+                    )
+            except json.JSONDecodeError, AttributeError:
+                pass
+
+        self._model = model
+        self._prompt_chars = prompt_chars
+
         cfg_obj = cfg.load_config()
         request = _Request(method, self.path, dict(self.headers.items()), body)
+        t0 = time.monotonic()
         try:
             resp, client = forward(cfg_obj, request)
         except UpstreamError as exc:
@@ -269,6 +290,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 cfg_obj = cfg.load_config()
                 resp, client = forward(cfg_obj, request, rotate_on_429=False)
             except UpstreamError as retry_exc:
+                self._elapsed_ms = (time.monotonic() - t0) * 1000
                 msg = {"error": {"message": str(retry_exc), "type": "upstream"}}
                 payload = json.dumps(msg).encode()
                 self.send_response(502)
@@ -280,6 +302,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             _respond(self, resp)
         finally:
+            self._elapsed_ms = (time.monotonic() - t0) * 1000
             client.close()
 
     def do_GET(self) -> None:  # noqa: D102
@@ -305,7 +328,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         """Log a request line to the events log."""
-        events.info("bridge %s", fmt % args)
+        parts = [fmt % args]
+
+        model = getattr(self, "_model", "")
+        if model:
+            parts.append(f"model={model}")
+
+        prompt_chars = getattr(self, "_prompt_chars", 0)
+        if prompt_chars:
+            if prompt_chars >= 1000:
+                parts.append(f"prompt={prompt_chars / 1000:.1f}k")
+            else:
+                parts.append(f"prompt={prompt_chars}")
+
+        elapsed = getattr(self, "_elapsed_ms", 0)
+        if elapsed:
+            if elapsed >= 1000:
+                parts.append(f"{elapsed / 1000:.1f}s")
+            else:
+                parts.append(f"{elapsed:.0f}ms")
+
+        events.info("bridge %s", " ".join(parts))
 
 
 class Bridge(ThreadingHTTPServer):
