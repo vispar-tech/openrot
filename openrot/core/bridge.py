@@ -28,7 +28,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin
 
 import httpx
-from rich.console import Console
 
 from openrot import config as cfg
 from openrot import signals
@@ -37,8 +36,13 @@ from openrot.core import cascade, daemon
 from openrot.log import get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
-console = Console()
 events = get_logger()
+
+
+def _log(msg: str) -> None:
+    """Log a message through the events logger with consistent formatting."""
+    events.info(msg)
+
 
 # Hop-by-hop headers never forwarded upstream.
 _HOP_BY_HOP = {
@@ -110,8 +114,11 @@ def _is_rate_limited(resp: httpx.Response, statuses: list[int]) -> bool:
 def _rotate_and_retry(cfg_obj: Config, request: _Request) -> httpx.Response:
     """Rotate the cascade once, then retry the request once."""
     events.warning("upstream retryable status, rotating cascade")
+    t0 = time.monotonic()
     with contextlib.suppress(SystemExit):  # no alive node available
         cascade.rotate()
+    elapsed = time.monotonic() - t0
+    _log(f"[warp] rotation took {elapsed:.1f}s")
     with _client(cfg_obj) as client:
         return _fetch(client, cfg_obj, request)
 
@@ -148,14 +155,14 @@ def forward(
 
 def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> None:
     """Write an upstream response back to the connected client, streaming the body."""
-    handler.send_response(resp.status_code)
-    for key, value in resp.headers.items():
-        if key.lower() in _HOP_BY_HOP:
-            continue
-        with contextlib.suppress(ValueError, OSError):
-            handler.send_header(key, value)
-    handler.end_headers()
     try:
+        handler.send_response(resp.status_code)
+        for key, value in resp.headers.items():
+            if key.lower() in _HOP_BY_HOP:
+                continue
+            with contextlib.suppress(ValueError, OSError):
+                handler.send_header(key, value)
+        handler.end_headers()
         for chunk in resp.iter_bytes():
             handler.wfile.write(chunk)
             handler.wfile.flush()
@@ -180,11 +187,11 @@ def warn_if_exposed(host: str) -> None:
     """
     if _is_loopback(host):
         return
-    console.print(
-        f"[bold red]SECURITY[/bold red] bridge binds to {host!r}, reachable "
-        "from other machines. It forwards your Authorization headers, so keep "
-        "it on 127.0.0.1 (the default). Open ports to the outside world only "
-        "if you truly intend to (Docker port publish / OPENROT_LISTEN)."
+    _log(
+        f"SECURITY: bridge binds to {host!r}, reachable from other machines. "
+        "It forwards your Authorization headers, so keep it on 127.0.0.1 "
+        "(the default). Open ports to the outside world only if you truly "
+        "intend to (Docker port publish / OPENROT_LISTEN)."
     )
 
 
@@ -213,17 +220,17 @@ def serve() -> None:
     """
     cfg_obj = cfg.load_config()
     if not _running_level(cfg_obj, cascade.level_serving):
-        console.print("no active level, starting cascade...")
+        _log("no active level, starting cascade...")
         cascade.start(False, False)
         cfg_obj = cfg.load_config()
 
     url = base_url(cfg_obj)
-    console.print(
-        f"bridge: [green]listening[/green] on {url} "
+    _log(
+        f"bridge: listening on {url} "
         f"(upstream {cfg_obj.bridge_upstream}, level {cfg_obj.active_level.value})"
     )
     if sys.stdout.isatty():
-        console.print("Ctrl-C to stop.")
+        _log("Ctrl-C to stop.")
     host = cfg.listen_address()
     warn_if_exposed(host)
     signals.keyboard_on_sigterm()
@@ -231,7 +238,7 @@ def serve() -> None:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        console.print("\nstopping bridge...")
+        _log("\nstopping bridge...")
     finally:
         server.server_close()
 
@@ -254,6 +261,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
     """Forward every request to the configured upstream through the cascade."""
 
     server_version = "openrot-bridge/1"
+
+    def _log_request_console(self, method: str) -> None:
+        elapsed_s = self._elapsed_ms / 1000
+        parts = [f"{method} {self.path}"]
+        model = getattr(self, "_model", "")
+        if model:
+            parts.append(model)
+        prompt_chars = getattr(self, "_prompt_chars", 0)
+        if prompt_chars:
+            parts.append(
+                f"prompt={prompt_chars / 1000:.1f}k"
+                if prompt_chars >= 1000
+                else f"prompt={prompt_chars}"
+            )
+        if elapsed_s >= 1:
+            parts.append(f"{elapsed_s:.1f}s")
+        else:
+            parts.append(f"{self._elapsed_ms:.0f}ms")
+        _log(f"[bridge] {' '.join(parts)}")
 
     def _handle(self, method: str) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -284,13 +310,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             resp, client = forward(cfg_obj, request)
         except UpstreamError as exc:
             events.warning("bridge upstream error, rotating and retrying: %s", exc)
+            t_rotate = time.monotonic()
             with contextlib.suppress(SystemExit):
                 cascade.rotate()
+            elapsed_rot = time.monotonic() - t_rotate
+            _log(f"[warp] rotation took {elapsed_rot:.1f}s")
             try:
                 cfg_obj = cfg.load_config()
                 resp, client = forward(cfg_obj, request, rotate_on_429=False)
             except UpstreamError as retry_exc:
                 self._elapsed_ms = (time.monotonic() - t0) * 1000
+                self._log_request_console(method)
                 msg = {"error": {"message": str(retry_exc), "type": "upstream"}}
                 payload = json.dumps(msg).encode()
                 self.send_response(502)
@@ -304,6 +334,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         finally:
             self._elapsed_ms = (time.monotonic() - t0) * 1000
             client.close()
+            self._log_request_console(method)
 
     def do_GET(self) -> None:  # noqa: D102
         self._handle("GET")

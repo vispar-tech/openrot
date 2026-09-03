@@ -105,7 +105,9 @@ def test_forward_rotates_and_retries_on_429(
 
     monkeypatch.setattr(bridge, "_client", make_client)
     rotated: list = []
+    logged: list[str] = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
 
     resp, client = bridge.forward(_cfg(), _req())
     try:
@@ -114,6 +116,7 @@ def test_forward_rotates_and_retries_on_429(
         assert resp.content == b"recovered"
     finally:
         client.close()
+    assert any("rotation took" in msg for msg in logged)
 
 
 def test_forward_no_rotate_when_disabled(
@@ -345,22 +348,22 @@ def test_running_level_combinations() -> None:
 
 
 def test_warn_if_exposed_silent_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
-    printed: list[str] = []
-    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    logged: list[str] = []
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     bridge.warn_if_exposed("127.0.0.1")
     bridge.warn_if_exposed("localhost")
-    assert printed == []
+    assert logged == []
 
 
 def test_warn_if_exposed_warns_on_non_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    printed: list[str] = []
-    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    logged: list[str] = []
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     bridge.warn_if_exposed("0.0.0.0")
     bridge.warn_if_exposed("192.168.1.20")
-    assert len(printed) == 2
-    assert all("SECURITY" in msg for msg in printed)
+    assert len(logged) == 2
+    assert all("SECURITY" in msg for msg in logged)
 
 
 def test_serve_warns_when_binding_beyond_loopback(
@@ -376,16 +379,16 @@ def test_serve_warns_when_binding_beyond_loopback(
         def server_close(self) -> None:
             pass
 
-    printed: list[str] = []
+    logged: list[str] = []
     monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
-    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     monkeypatch.setattr(bridge.cfg, "listen_address", lambda: "0.0.0.0")
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
 
     bridge.serve()
 
-    assert any("SECURITY" in msg for msg in printed)
+    assert any("SECURITY" in msg for msg in logged)
 
 
 class _FakeStdout:
@@ -411,7 +414,7 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
     printed: list[str] = []
     monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
-    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
 
@@ -435,7 +438,7 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
     printed: list[str] = []
     monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
-    monkeypatch.setattr(bridge.console, "print", lambda *a, **k: printed.append(a[0]))
+    monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
 
@@ -514,6 +517,83 @@ def test_handler_returns_502_on_upstream_error(
     handler._handle("POST")
     assert status == [502]
     assert b'"upstream"' in written[0]
+
+
+def test_handler_logs_request_elapsed_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    body = b'{"model":"gpt-4o","messages":[{"content":"hello world"}]}'
+    handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+    handler.headers = SimpleNamespace(get=lambda k, d=0: len(body), items=list)
+    handler.rfile = SimpleNamespace(read=lambda n: body)
+    handler.path = "/v1/chat/completions"
+    handler.wfile = SimpleNamespace(write=lambda b: None)
+    handler.send_response = lambda code: None
+    handler.send_header = lambda k, v: None
+    handler.end_headers = lambda: None
+
+    logged: list[str] = []
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge, "_respond", lambda handler, resp: None)
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+
+    resp = httpx.Response(200, content=b"ok")
+    client = _FakeClient([resp])
+
+    def fake_forward(cfg_obj: object, request: object, **kw: object) -> object:
+        return (resp, client)
+
+    monkeypatch.setattr(bridge, "forward", fake_forward)
+    handler._handle("POST")
+
+    line = next(msg for msg in logged if msg.startswith("[bridge] POST"))
+    assert "gpt-4o" in line
+    assert "model=gpt-4o" not in line
+    assert "prompt=" in line
+    assert any(k in line for k in ("ms", "s"))
+
+
+def test_handler_rotates_and_retries_after_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+    handler.headers = SimpleNamespace(get=lambda k, d=0: 0, items=list)
+    handler.rfile = SimpleNamespace(read=lambda n: b"")
+    handler.path = "/v1/chat/completions"
+    handler.wfile = SimpleNamespace(write=lambda b: None)
+    handler.send_response = lambda code: None
+    handler.send_header = lambda k, v: None
+    handler.end_headers = lambda: None
+
+    logged: list[str] = []
+    rotated: list = []
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+    monkeypatch.setattr(bridge, "_respond", lambda handler, resp: None)
+    monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
+
+    resp = httpx.Response(200, content=b"ok")
+    client = _FakeClient([resp])
+    calls: list[bool] = []
+
+    def flaky_forward(cfg_obj: object, request: object, **kw: object) -> object:
+        calls.append(kw.get("rotate_on_429", True))
+        if not calls or len(calls) == 1:
+            raise bridge.UpstreamError("conn drop")
+        return (resp, client)
+
+    monkeypatch.setattr(bridge, "forward", flaky_forward)
+    handler._handle("POST")
+    assert len(rotated) == 1
+    assert any("rotation took" in msg for msg in logged)
+    assert any(
+        msg.startswith("[bridge] POST") and ("ms" in msg or "s" in msg)
+        for msg in logged
+    )
 
 
 def test_bridge_server_binds_and_closes() -> None:

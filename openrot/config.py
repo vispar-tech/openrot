@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 try:
     import fcntl
