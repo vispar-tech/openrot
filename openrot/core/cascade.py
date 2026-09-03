@@ -14,6 +14,7 @@ from openrot.providers import warp
 
 console = Console()
 events = log.get_logger()
+_rotate_lock = threading.Lock()
 
 
 def launch(cfg_obj: Config, node: Node) -> int:
@@ -255,7 +256,20 @@ def rotate(first: bool = False) -> None:
 
     ``first=True`` resets the queue to the start: serve the first node of the
     chain (no exclusion of the current one).
+
+    Thread-safe: concurrent calls are serialized; when a rotation is already
+    in progress the caller returns immediately without blocking.
     """
+    if not _rotate_lock.acquire(blocking=False):
+        events.warning("rotate skipped: another rotation already in progress")
+        return
+    try:
+        _rotate_inner(first)
+    finally:
+        _rotate_lock.release()
+
+
+def _rotate_inner(first: bool) -> None:
     cfg_obj = cfg.load_config()
     if cfg_obj.active_level == ActiveLevel.WARP:
         if warp.rotate():

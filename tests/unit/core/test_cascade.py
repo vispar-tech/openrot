@@ -571,3 +571,46 @@ def test_warp_health_loop_continues_while_connected(
         cascade.warp_health_loop()
 
     assert call_count["n"] == 2
+
+
+def test_rotate_skips_when_already_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent rotate() returns immediately while another is running."""
+    rotate_started = threading.Event()
+    rotate_proceed = threading.Event()
+    call_count = {"n": 0}
+
+    def slow_warp_rotate() -> bool:
+        call_count["n"] += 1
+        rotate_started.set()
+        rotate_proceed.wait(timeout=5)
+        return True
+
+    conf = Config(update_interval=0, active_level=ActiveLevel.WARP)
+    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
+    monkeypatch.setattr(cascade.warp, "rotate", slow_warp_rotate)
+    monkeypatch.setattr(cascade.warp, "current_ip", lambda: "1.1.1.1")
+    _patch_events(monkeypatch)
+
+    results: list[str] = []
+
+    def first_rotate() -> None:
+        cascade.rotate()
+        results.append("done")
+
+    def second_rotate() -> None:
+        rotate_started.wait(timeout=5)
+        cascade.rotate()
+        results.append("skipped")
+
+    t1 = threading.Thread(target=first_rotate)
+    t2 = threading.Thread(target=second_rotate)
+    t1.start()
+    t2.start()
+    rotate_proceed.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert call_count["n"] == 1
+    assert sorted(results) == ["done", "skipped"]
