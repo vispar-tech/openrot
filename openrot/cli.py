@@ -575,58 +575,39 @@ def logs(
         50, "--tail", "-n", min=0, help="lines shown from each file before following"
     ),
 ) -> None:
-    """Follow the daemon, events and bridge logs, aggregated into one stream."""
-    sources = {
-        "daemon": cfg.LOG_PATH,
-        "events": cfg.EVENT_LOG_PATH,
-        "bridge": cfg.BRIDGE_LOG_PATH,
-    }
+    """Follow the openrot log file."""
+    path = cfg.LOG_PATH
+    if not path.exists():
+        console.print(f"[yellow]no log yet: {path}[/yellow]")
+        return
     if not follow:
-        for name, path in sources.items():
-            _print_log_tail(name, path, tail)
+        with path.open(errors="replace") as f:
+            content = f.readlines()
+        for line in content[-tail:]:
+            console.print(line.rstrip())
         return
     signals.keyboard_on_sigterm()
     try:
-        _follow_logs(sources, tail)
+        _follow_log(path, tail)
     except KeyboardInterrupt:
         console.print("\nstopped following logs")
 
 
-def _print_log_tail(name: str, path: Path, lines: int) -> None:
-    if not path.exists():
-        console.print(f"[yellow]no {name} log yet: {path}[/yellow]")
-        return
-    with path.open(errors="replace") as f:
-        content = f.readlines()
-    for line in content[-lines:]:
-        console.print(f"[bold]{name}[/bold] | {line.rstrip()}")
-
-
-def _follow_logs(sources: dict[str, Path], tail: int) -> None:
-    positions: dict[str, int] = {}
-    for name, path in sources.items():
-        if not path.exists():
-            console.print(f"[yellow]no {name} log yet: {path}[/yellow]")
-            positions[name] = -1
-            continue
-        with path.open("rb") as f:
-            positions[name] = f.seek(0, os.SEEK_END)
-        lines = _read_last_lines(path, tail)
-        for line in lines:
-            console.print(f"[bold]{name}[/bold] | {line}")
+def _follow_log(path: Path, tail: int) -> None:
+    with path.open("rb") as f:
+        position = f.seek(0, os.SEEK_END)
+    lines = _read_last_lines(path, tail)
+    for line in lines:
+        console.print(line)
     while True:
-        for name, path in sources.items():
-            pos = positions.get(name)
-            if pos is None or pos < 0 or not path.exists():
-                continue
-            with path.open("rb") as f:
-                f.seek(pos)
-                chunk = f.read()
-                positions[name] = f.tell()
-            if chunk:
-                text = chunk.decode("utf-8", errors="replace")
-                for line in text.splitlines():
-                    console.print(f"[bold]{name}[/bold] | {line}")
+        with path.open("rb") as f:
+            f.seek(position)
+            chunk = f.read()
+            position = f.tell()
+        if chunk:
+            text = chunk.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                console.print(line)
         time.sleep(0.5)
 
 

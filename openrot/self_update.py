@@ -49,7 +49,7 @@ def _stop_services() -> None:
 def _restart_services(state: ServiceState) -> None:
     """Restart openrot services that were running before the update."""
     if state.daemon_running:
-        daemon.daemon_start_background("cascade", cfg.DAEMON_PID_PATH, cfg.LOG_PATH)
+        daemon.daemon_start_background("cascade", cfg.DAEMON_PID_PATH)
 
 
 class UpdateResult(NamedTuple):

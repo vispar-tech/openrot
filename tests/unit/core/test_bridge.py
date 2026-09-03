@@ -310,16 +310,14 @@ def test_daemonize_delegates_to_daemon_start(
         kwargs_called.update(kw)
 
     pid_path = tmp_path / "x.pid"
-    log_path = tmp_path / "x.log"
     monkeypatch.setattr(daemon, "start", fake_start)
     monkeypatch.setattr(bridge.cfg, "BRIDGE_PID_PATH", pid_path)
-    monkeypatch.setattr(bridge.cfg, "BRIDGE_LOG_PATH", log_path)
 
     bridge.daemonize()
 
     assert kwargs_called["name"] == "bridge"
     assert kwargs_called["pid_path"] == pid_path
-    assert kwargs_called["log_path"] == log_path
+    assert "log_path" not in kwargs_called
     assert "rotate_log" not in kwargs_called
 
 
@@ -412,15 +410,22 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
             pass
 
     printed: list[str] = []
+    console_printed: list[str] = []
     monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
+    monkeypatch.setattr(bridge, "console_echo", lambda: None)
+    monkeypatch.setattr(
+        bridge.console, "print", lambda *a, **k: console_printed.append(a[0])
+    )
 
     bridge.serve()
 
     assert not any("Ctrl-C to stop." in msg for msg in printed)
+    assert not any("Ctrl-C to stop." in msg for msg in console_printed)
+    assert any("stopping bridge" in msg for msg in console_printed)
 
 
 def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -436,15 +441,21 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
             pass
 
     printed: list[str] = []
+    console_printed: list[str] = []
     monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
+    monkeypatch.setattr(bridge, "console_echo", lambda: None)
+    monkeypatch.setattr(
+        bridge.console, "print", lambda *a, **k: console_printed.append(a[0])
+    )
 
     bridge.serve()
 
-    assert any("Ctrl-C to stop." in msg for msg in printed)
+    assert any("Ctrl-C to stop." in msg for msg in console_printed)
+    assert any("stopping bridge" in msg for msg in console_printed)
 
 
 def test_respond_streams_body_and_skips_hop_by_hop() -> None:
@@ -551,7 +562,7 @@ def test_handler_logs_request_elapsed_and_model(
     line = next(msg for msg in logged if msg.startswith("[bridge] POST"))
     assert "gpt-4o" in line
     assert "model=gpt-4o" not in line
-    assert "prompt=" in line
+    assert "input=" in line
     assert any(k in line for k in ("ms", "s"))
 
 
