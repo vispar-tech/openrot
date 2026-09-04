@@ -106,7 +106,7 @@ def test_forward_rotates_and_retries_on_429(
     monkeypatch.setattr(bridge, "_client", make_client)
     rotated: list = []
     logged: list[str] = []
-    monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
+    monkeypatch.setattr(bridge.cascade, "rotate", lambda: (rotated.append(1), True)[1])
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
 
     resp, client = bridge.forward(_cfg(), _req())
@@ -117,6 +117,33 @@ def test_forward_rotates_and_retries_on_429(
     finally:
         client.close()
     assert any("rotation took" in msg for msg in logged)
+
+
+def test_forward_waits_and_retries_when_rotation_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: list[httpx.Response] = [
+        httpx.Response(429),
+        httpx.Response(200, content=b"recovered"),
+    ]
+    fake = _FakeClient(queue)
+
+    def make_client(cfg: Config) -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr(bridge, "_client", make_client)
+    logged: list[str] = []
+    monkeypatch.setattr(bridge.cascade, "rotate", lambda: False)
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+
+    resp, client = bridge.forward(_cfg(), _req())
+    try:
+        assert resp.status_code == 200
+        assert resp.content == b"recovered"
+    finally:
+        client.close()
+    assert any("waited" in msg for msg in logged)
+    assert not any("rotation took" in msg for msg in logged)
 
 
 def test_forward_no_rotate_when_disabled(
@@ -585,7 +612,7 @@ def test_handler_rotates_and_retries_after_upstream_error(
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     monkeypatch.setattr(bridge, "_respond", lambda handler, resp: None)
-    monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
+    monkeypatch.setattr(bridge.cascade, "rotate", lambda: (rotated.append(1), True)[1])
 
     resp = httpx.Response(200, content=b"ok")
     client = _FakeClient([resp])

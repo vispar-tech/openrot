@@ -115,13 +115,18 @@ def _is_rate_limited(resp: httpx.Response, statuses: list[int]) -> bool:
 
 
 def _rotate_and_retry(cfg_obj: Config, request: _Request) -> httpx.Response:
-    """Rotate the cascade once, then retry the request once."""
-    events.warning("upstream retryable status, rotating cascade")
+    """Rotate the cascade once (waiting if already in progress), then retry."""
     t0 = time.monotonic()
+    rotated = False
     with contextlib.suppress(SystemExit):  # no alive node available
-        cascade.rotate()
+        rotated = cascade.rotate()
     elapsed = time.monotonic() - t0
-    _log(f"[warp] rotation took {elapsed:.1f}s")
+    if rotated:
+        events.warning("upstream retryable status, rotating cascade")
+        _log(f"[warp] rotation took {elapsed:.1f}s")
+    else:
+        events.warning("rotation already in progress, waiting and retrying")
+        _log(f"[warp] waited {elapsed:.1f}s for in-progress rotation")
     with _client(cfg_obj) as client:
         return _fetch(client, cfg_obj, request)
 
@@ -291,6 +296,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parts.append(f"time={self._elapsed_ms:.0f}ms")
         _log(f"[bridge] {' '.join(parts)}")
 
+    @staticmethod
+    def _log_rotation(rotated: bool, elapsed_s: float) -> None:
+        if rotated:
+            _log(f"[warp] rotation took {elapsed_s:.1f}s")
+        else:
+            _log(f"[warp] waited {elapsed_s:.1f}s for in-progress rotation")
+
     def _handle(self, method: str) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
@@ -321,10 +333,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except UpstreamError as exc:
             events.warning("bridge upstream error, rotating and retrying: %s", exc)
             t_rotate = time.monotonic()
+            rotated = False
             with contextlib.suppress(SystemExit):
-                cascade.rotate()
-            elapsed_rot = time.monotonic() - t_rotate
-            _log(f"[warp] rotation took {elapsed_rot:.1f}s")
+                rotated = cascade.rotate()
+            self._log_rotation(rotated, time.monotonic() - t_rotate)
             try:
                 cfg_obj = cfg.load_config()
                 resp, client = forward(cfg_obj, request, rotate_on_429=False)
