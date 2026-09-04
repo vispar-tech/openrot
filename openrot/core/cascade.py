@@ -15,6 +15,7 @@ from openrot.providers import warp
 console = Console()
 events = log.get_logger()
 _rotate_lock = threading.Lock()
+_rotate_in_progress = threading.Event()
 
 
 def launch(cfg_obj: Config, node: Node) -> int:
@@ -226,22 +227,31 @@ def warp_health_loop() -> None:
         return
 
 
-def rotate(first: bool = False) -> None:
+def rotate(first: bool = False) -> bool:
     """Rotate WARP IP, or pick the next node by priority in the chain.
 
     ``first=True`` resets the queue to the start: serve the first node of the
     chain (no exclusion of the current one).
 
-    Thread-safe: concurrent calls are serialized; when a rotation is already
-    in progress the caller returns immediately without blocking.
+    Thread-safe: concurrent calls are serialized. When a rotation is already
+    in progress the caller waits for it to finish and returns ``False``
+    (the cascade has already been rotated by someone else). Returns ``True``
+    when this caller actually performed the rotation.
     """
-    if not _rotate_lock.acquire(blocking=False):
-        events.warning("rotate skipped: another rotation already in progress")
-        return
+    with _rotate_lock:
+        if _rotate_in_progress.is_set():
+            waiting = True
+        else:
+            _rotate_in_progress.set()
+            waiting = False
+    if waiting:
+        _rotate_in_progress.wait()
+        return False
     try:
         _rotate_inner(first)
+        return True
     finally:
-        _rotate_lock.release()
+        _rotate_in_progress.clear()
 
 
 def _rotate_inner(first: bool) -> None:
