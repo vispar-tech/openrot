@@ -14,6 +14,9 @@ WARP_PROXY_HOST = "127.0.0.1"
 WARP_PROXY_PORT = 40000
 IPIFY_URL = "https://api.ipify.org?format=json"
 
+ROTATE_DELAY = float(os.environ.get("OPENROT_WARP_ROTATE_DELAY", "10"))
+ROTATE_MAX_ATTEMPTS = int(os.environ.get("OPENROT_WARP_ROTATE_ATTEMPTS", "5"))
+
 console = Console()
 events = log.get_logger()
 
@@ -119,11 +122,44 @@ def current_ip() -> str | None:
 
 
 def rotate() -> bool:
-    """Reconnect WARP to obtain a fresh IP."""
+    """Reconnect WARP to obtain a fresh IP.
+
+    Disconnects, waits for the session to fully tear down, reconnects,
+    and verifies the IP actually changed. Retries up to ROTATE_MAX_ATTEMPTS
+    times if Cloudflare re-assigns the same address.
+    """
     if not is_installed():
         return False
-    disconnect()
-    return connect()
+
+    old_ip = current_ip()
+
+    for attempt in range(1, ROTATE_MAX_ATTEMPTS + 1):
+        disconnect()
+
+        if ROTATE_DELAY > 0:
+            events.info(
+                "warp: waiting %.0fs before reconnect (attempt %d/%d)",
+                ROTATE_DELAY,
+                attempt,
+                ROTATE_MAX_ATTEMPTS,
+            )
+            time.sleep(ROTATE_DELAY)
+
+        if not connect():
+            events.warning("warp: reconnect failed on attempt %d", attempt)
+            continue
+
+        new_ip = current_ip()
+        if new_ip and new_ip != old_ip:
+            events.info(
+                "warp: IP rotated %s → %s (attempt %d)", old_ip or "?", new_ip, attempt
+            )
+            return True
+
+        events.info("warp: IP unchanged (%s), retrying...", new_ip or "?")
+
+    events.warning("warp: rotation exhausted, IP may not have changed")
+    return is_connected()
 
 
 def install() -> None:

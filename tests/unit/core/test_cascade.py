@@ -99,25 +99,6 @@ def test_start_foreground_interrupt_races_scheduler(
     assert conf.active_level == ActiveLevel.NONE
 
 
-def test_start_foreground_echoes_events_to_console(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    echoed = {"n": 0}
-
-    def fake_echo() -> None:
-        echoed["n"] += 1
-
-    monkeypatch.setattr(cascade.log, "console_echo", fake_echo)
-    monkeypatch.setattr(cascade, "start_warp", lambda foreground: False)
-    monkeypatch.setattr(cascade, "start_node", lambda foreground: None)
-    monkeypatch.setattr(cascade.proxy, "load_pid", lambda: None)
-    cfg_obj = Config(update_interval=0, port=1080)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: cfg_obj)
-
-    cascade.start(True, False)
-    assert echoed["n"] == 1
-
-
 def test_start_with_daemon_flag_forks(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {"n": 0}
 

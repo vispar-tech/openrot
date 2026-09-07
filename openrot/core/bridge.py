@@ -21,6 +21,7 @@ import contextlib
 import json
 import socket
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,7 +35,6 @@ from openrot import config as cfg
 from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
-from openrot.log import console_echo
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
@@ -59,6 +59,17 @@ _HOP_BY_HOP = {
 
 class UpstreamError(Exception):
     """Raised when the upstream leg of a bridge request fails."""
+
+
+def _send_502(handler: BaseHTTPRequestHandler, message: str) -> None:
+    """Write a JSON 502 response to the connected client."""
+    msg = {"error": {"message": message, "type": "upstream"}}
+    payload = json.dumps(msg).encode()
+    handler.send_response(502)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
 
 
 def upstream_url(cfg_obj: Config, path: str) -> str:
@@ -110,25 +121,126 @@ def _fetch(
         raise UpstreamError(str(exc)) from exc
 
 
-def _is_rate_limited(resp: httpx.Response, statuses: list[int]) -> bool:
-    return resp.status_code in statuses
+_RETRY_DELAY_DEFAULT = 5.0
 
 
-def _rotate_and_retry(cfg_obj: Config, request: _Request) -> httpx.Response:
-    """Rotate the cascade once (waiting if already in progress), then retry."""
-    t0 = time.monotonic()
-    rotated = False
-    with contextlib.suppress(SystemExit):  # no alive node available
-        rotated = cascade.rotate()
-    elapsed = time.monotonic() - t0
+def _is_usage_limit_error(resp: httpx.Response) -> bool:
+    """Return True when a 429 body contains FreeUsageLimitError."""
+    if resp.status_code != 429:
+        return False
+    try:
+        data = json.loads(resp.text)
+        error = data.get("error", {})
+        return isinstance(error, dict) and error.get("type") == "FreeUsageLimitError"
+    except json.JSONDecodeError, AttributeError:
+        return False
+
+
+def _retry_delay(resp: httpx.Response) -> float:
+    """Parse ``Retry-After`` header or fall back to a fixed delay."""
+    if raw := resp.headers.get("Retry-After"):
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _RETRY_DELAY_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# Shared httpx client — created once, reused across requests.
+# ---------------------------------------------------------------------------
+
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+
+def _get_client(cfg_obj: Config) -> httpx.Client:
+    """Return the shared ``httpx.Client``, creating it on first call."""
+    global _shared_client
+    if _shared_client is not None:
+        return _shared_client
+    with _shared_client_lock:
+        if _shared_client is not None:
+            return _shared_client
+        _shared_client = _client(cfg_obj)
+        return _shared_client
+
+
+def _reset_client() -> None:
+    """Close and discard the shared client (used in tests and shutdown)."""
+    global _shared_client
+    with _shared_client_lock:
+        if _shared_client is not None:
+            _shared_client.close()
+            _shared_client = None
+
+
+# ---------------------------------------------------------------------------
+# Concurrency limiter — prevents too many parallel upstream requests.
+# ---------------------------------------------------------------------------
+
+_request_semaphore: threading.Semaphore | None = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore(cfg_obj: Config) -> threading.Semaphore:
+    """Return the request semaphore, creating it on first call."""
+    global _request_semaphore
+    if _request_semaphore is not None:
+        return _request_semaphore
+    with _semaphore_lock:
+        if _request_semaphore is not None:
+            return _request_semaphore
+        _request_semaphore = threading.Semaphore(cfg_obj.bridge_max_concurrent)
+        return _request_semaphore
+
+
+# ---------------------------------------------------------------------------
+# Rotation logging — shared between forward() and BridgeHandler.
+# ---------------------------------------------------------------------------
+
+
+def _log_rotation(rotated: bool, elapsed_s: float) -> None:
     if rotated:
-        events.warning("upstream retryable status, rotating cascade")
-        _log(f"[warp] rotation took {elapsed:.1f}s")
+        _log(f"[warp] rotation took {elapsed_s:.1f}s")
     else:
-        events.warning("rotation already in progress, waiting and retrying")
-        _log(f"[warp] waited {elapsed:.1f}s for in-progress rotation")
-    with _client(cfg_obj) as client:
-        return _fetch(client, cfg_obj, request)
+        _log(f"[warp] waited {elapsed_s:.1f}s for in-progress rotation")
+
+
+def _rotate_and_retry(
+    cfg_obj: Config,
+    request: _Request,
+    client: httpx.Client,
+) -> httpx.Response:
+    """Rotate on FreeUsageLimitError; wait on other 429s.
+
+    Retries up to ``cfg.bridge_retry_attempts`` times before giving up.
+    """
+    t0 = time.monotonic()
+    resp = _fetch(client, cfg_obj, request)
+    statuses = cfg_obj.bridge_retry_statuses
+    attempts = cfg_obj.bridge_retry_attempts
+
+    for _ in range(attempts):
+        if resp.status_code not in statuses:
+            break
+
+        if resp.status_code == 429 and _is_usage_limit_error(resp):
+            rotated = False
+            with contextlib.suppress(SystemExit):
+                rotated = cascade.rotate()
+            _log_rotation(rotated, time.monotonic() - t0)
+            t0 = time.monotonic()
+            resp.close()
+            resp = _fetch(client, cfg_obj, request)
+        else:
+            delay = _retry_delay(resp)
+            _log(f"[bridge] rate limited, waiting {delay:.1f}s")
+            resp.close()
+            time.sleep(delay)
+            resp = _fetch(client, cfg_obj, request)
+
+    return resp
 
 
 def forward(
@@ -137,27 +249,17 @@ def forward(
     *,
     rotate_on_429: bool = True,
 ) -> tuple[httpx.Response, httpx.Client]:
-    """Send one logical request through the cascade, rotating on retryable status.
+    """Send one request through the cascade, rotating on FreeUsageLimitError.
 
-    On an HTTP status in ``cfg.bridge_retry_statuses`` (default ``[429]``) the
-    bridge rotates the cascade and retries the same request up to
-    ``cfg.bridge_retry_attempts`` (default 1) times before giving up. Returns
-    ``(response, client)``; the client is the owner of ``response`` and the
-    caller must close it once the response body has been consumed.
+    Returns ``(response, client)`` where ``client`` is the shared singleton —
+    callers must **not** close it.  The response is closed internally by
+    ``_respond`` after the body has been streamed to the connected client.
     """
-    client = _client(cfg_obj)
-    resp = _fetch(client, cfg_obj, request)
-    statuses = cfg_obj.bridge_retry_statuses
-    attempts = cfg_obj.bridge_retry_attempts
-    if rotate_on_429 and attempts > 0 and resp.status_code in statuses:
-        client.close()
-        left = attempts
-        while left > 0:
-            left -= 1
-            resp = _rotate_and_retry(cfg_obj, request)
-            if resp.status_code not in statuses:
-                break
-        client = _client(cfg_obj)
+    client = _get_client(cfg_obj)
+    if rotate_on_429 and cfg_obj.bridge_retry_attempts > 0:
+        resp = _rotate_and_retry(cfg_obj, request, client)
+    else:
+        resp = _fetch(client, cfg_obj, request)
     return resp, client
 
 
@@ -226,15 +328,14 @@ def serve() -> None:
     point any OpenAI-compatible client at the loopback URL and watch it route
     through the cascade with 429 self-rotation. Ctrl-C stops it.
     """
-    console_echo()
     cfg_obj = cfg.load_config()
     if not _running_level(cfg_obj, cascade.level_serving):
-        _log("no active level, starting cascade...")
+        console.print("no active level, starting cascade...")
         cascade.start(False, False)
         cfg_obj = cfg.load_config()
 
     url = base_url(cfg_obj)
-    _log(
+    console.print(
         f"bridge: listening on {url} "
         f"(upstream {cfg_obj.bridge_upstream}, level {cfg_obj.active_level.value})"
     )
@@ -250,6 +351,7 @@ def serve() -> None:
         console.print("[dim]stopping bridge...[/dim]")
     finally:
         server.server_close()
+        _reset_client()
 
 
 def daemonize() -> None:
@@ -296,13 +398,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parts.append(f"time={self._elapsed_ms:.0f}ms")
         _log(f"[bridge] {' '.join(parts)}")
 
-    @staticmethod
-    def _log_rotation(rotated: bool, elapsed_s: float) -> None:
-        if rotated:
-            _log(f"[warp] rotation took {elapsed_s:.1f}s")
-        else:
-            _log(f"[warp] waited {elapsed_s:.1f}s for in-progress rotation")
-
     def _handle(self, method: str) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
@@ -327,37 +422,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         cfg_obj = cfg.load_config()
         request = _Request(method, self.path, dict(self.headers.items()), body)
+        semaphore = _get_semaphore(cfg_obj)
         t0 = time.monotonic()
+        semaphore.acquire()
         try:
-            resp, client = forward(cfg_obj, request)
+            resp, _client = forward(cfg_obj, request)
         except UpstreamError as exc:
             events.warning("bridge upstream error, rotating and retrying: %s", exc)
             t_rotate = time.monotonic()
             rotated = False
             with contextlib.suppress(SystemExit):
                 rotated = cascade.rotate()
-            self._log_rotation(rotated, time.monotonic() - t_rotate)
+            _log_rotation(rotated, time.monotonic() - t_rotate)
             try:
                 cfg_obj = cfg.load_config()
-                resp, client = forward(cfg_obj, request, rotate_on_429=False)
+                resp, _client = forward(cfg_obj, request, rotate_on_429=False)
             except UpstreamError as retry_exc:
                 self._elapsed_ms = (time.monotonic() - t0) * 1000
                 self._output_chars = 0
                 self._log_request_console(method)
-                msg = {"error": {"message": str(retry_exc), "type": "upstream"}}
-                payload = json.dumps(msg).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                _send_502(self, str(retry_exc))
                 return
+        finally:
+            semaphore.release()
         self._output_chars = int(resp.headers.get("content-length", 0) or 0)
         try:
             _respond(self, resp)
         finally:
             self._elapsed_ms = (time.monotonic() - t0) * 1000
-            client.close()
             self._log_request_console(method)
 
     def do_GET(self) -> None:  # noqa: D102

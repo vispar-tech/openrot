@@ -143,6 +143,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
         cfg.bridge_upstream = bridge_upstream
     _env_int_list("OPENROT_BRIDGE_RETRY_STATUSES", "bridge_retry_statuses", cfg)
     _env_int("OPENROT_BRIDGE_RETRY_ATTEMPTS", "bridge_retry_attempts", cfg)
+    _env_int("OPENROT_BRIDGE_MAX_CONCURRENT", "bridge_max_concurrent", cfg)
     _env_int("OPENROT_MAX_WORKERS", "max_workers", cfg)
     return cfg
 

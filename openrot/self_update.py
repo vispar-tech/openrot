@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -23,19 +24,22 @@ DOWNLOAD_BASE = f"https://github.com/{GH_REPO}/releases/download"
 
 
 class ServiceState(NamedTuple):
-    """Tracks whether openrot daemon/proxy were running before an update."""
+    """Tracks which openrot services were running before an update."""
 
     daemon_running: bool
     proxy_running: bool
+    bridge_running: bool
 
 
 def _check_services() -> ServiceState:
-    """Check if any openrot daemon/proxy processes are currently running."""
+    """Check which openrot daemon/proxy/bridge processes are currently running."""
     daemon_pid = daemon.load_daemon_pid(cfg.DAEMON_PID_PATH)
     proxy_pid = proxy.load_pid(cfg.PID_PATH)
+    bridge_pid = daemon.load_daemon_pid(cfg.BRIDGE_PID_PATH)
     return ServiceState(
         daemon_running=daemon_pid is not None and proxy.is_running(daemon_pid),
         proxy_running=proxy_pid is not None and proxy.is_running(proxy_pid),
+        bridge_running=bridge_pid is not None and proxy.is_running(bridge_pid),
     )
 
 
@@ -50,6 +54,14 @@ def _restart_services(state: ServiceState) -> None:
     """Restart openrot services that were running before the update."""
     if state.daemon_running:
         daemon.daemon_start_background("cascade", cfg.DAEMON_PID_PATH)
+    if state.bridge_running:
+        daemon.daemon_start_background("bridge", cfg.BRIDGE_PID_PATH)
+
+
+def _print_new_version() -> None:
+    """Print the freshly installed binary's version by re-exec'ing it."""
+    binary = Path(sys.executable).resolve()
+    subprocess.run([str(binary), "--version"], check=True)  # noqa: S603
 
 
 class UpdateResult(NamedTuple):
@@ -146,17 +158,22 @@ def perform_update(
 ) -> UpdateResult:
     """Download and install the latest release, replacing the current binary."""
     state = _check_services()
-    if state.daemon_running or state.proxy_running:
+    if state.daemon_running or state.proxy_running or state.bridge_running:
         _stop_services()
     close = client is None
     if client is None:
         client = httpx.Client(follow_redirects=True)
     try:
-        return _do_update(client, progress_fn)
+        result = _do_update(client, progress_fn)
     finally:
         if close:
             client.close()
+    try:
+        if result.updated:
+            _print_new_version()
+    finally:
         _restart_services(state)
+    return result
 
 
 def _download_archive(

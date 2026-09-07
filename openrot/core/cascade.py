@@ -48,15 +48,12 @@ def _shutdown() -> None:
 def start(foreground: bool, daemon: bool) -> None:
     """Start the cascade: WARP (if enabled) → node chain by priority.
 
-    ``foreground=True`` blocks in the health-check loop and echoes the events
-    log to the terminal; ``daemon=True`` forks that loop into a detached
-    background process.
+    ``foreground=True`` blocks in the health-check loop; ``daemon=True``
+    forks that loop into a detached background process.
     """
     if daemon and not foreground:
         daemonize()
         return
-    if foreground:
-        log.console_echo()
     already = proxy.load_pid()
     if already is not None and proxy.is_running(already):
         console.print(

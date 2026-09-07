@@ -51,6 +51,31 @@ def test_start_forks_detached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(kwargs, dict) and kwargs.get("start_new_session") is True
 
 
+def test_start_detaches_daemon_stdio_from_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, object] = {}
+
+    class Proc:
+        pid = 987
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> object:
+        calls["kwargs"] = kwargs
+        return Proc()
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon, "load_daemon_pid", lambda path=None: None)
+    monkeypatch.setattr(daemon, "save_daemon_pid", lambda pid, path=None: None)
+
+    daemon.start(name="bridge", pid_path=tmp_path / "openrot-bridge.daemon.pid")
+
+    kwargs = calls["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs.get("stdin") == daemon.subprocess.DEVNULL
+    assert kwargs.get("stdout") == daemon.subprocess.DEVNULL
+    assert kwargs.get("stderr") == daemon.subprocess.DEVNULL
+
+
 def test_start_frozen_reuses_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
