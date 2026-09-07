@@ -26,6 +26,30 @@ def command(subcommand: str) -> list[str]:
     return [sys.executable, "-m", "openrot", "start", subcommand]
 
 
+def _detached_stdio() -> tuple[int, int, int]:
+    """Return stdio that detaches a background daemon from the terminal.
+
+    stdin reads nothing; stdout/stderr go to /dev/null so foreground-style
+    console output never leaks back onto the user's shell.  All meaningful
+    logging goes through the events logger (RotatingFileHandler) instead.
+    """
+    return subprocess.DEVNULL, subprocess.DEVNULL, subprocess.DEVNULL  # type: ignore[misc]
+
+
+def _spawn_daemon(name: str, pid_path: Path) -> int:
+    """Fork ``start <name>`` into a detached process and record its pid."""
+    stdin, stdout, stderr = _detached_stdio()
+    proc = subprocess.Popen(  # noqa: S603
+        command(name),
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
+    save_daemon_pid(proc.pid, path=pid_path)
+    return proc.pid
+
+
 def start(*, name: str, pid_path: Path) -> None:
     """Fork the ``start <name>`` loop into a background daemon process.
 
@@ -39,12 +63,8 @@ def start(*, name: str, pid_path: Path) -> None:
             console.print(f"[yellow]{name} daemon already running[/yellow]")
             return
         pid_path.unlink(missing_ok=True)
-    proc = subprocess.Popen(  # noqa: S603
-        command(name),
-        start_new_session=True,
-    )
-    save_daemon_pid(proc.pid, path=pid_path)
-    console.print(f"{name} daemon started (pid {proc.pid})")
+    pid = _spawn_daemon(name, pid_path)
+    console.print(f"{name} daemon started (pid {pid})")
 
 
 def stop(pid_path: Path) -> bool:
@@ -82,8 +102,4 @@ def stop_and_wait(pid_path: Path) -> bool:
 
 def daemon_start_background(name: str, pid_path: Path) -> None:
     """Start a daemon in a detached background process (for restart after update)."""
-    proc = subprocess.Popen(  # noqa: S603
-        command(name),
-        start_new_session=True,
-    )
-    save_daemon_pid(proc.pid, path=pid_path)
+    _spawn_daemon(name, pid_path)

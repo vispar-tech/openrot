@@ -39,10 +39,33 @@ def test_upstream_url_uses_configured_upstream() -> None:
     )
 
 
-def test_is_rate_limited() -> None:
-    assert bridge._is_rate_limited(httpx.Response(429), [429])
-    assert not bridge._is_rate_limited(httpx.Response(200), [429])
-    assert bridge._is_rate_limited(httpx.Response(503), [429, 503])
+def _usage_limit_body() -> bytes:
+    """Return a JSON body that signals FreeUsageLimitError."""
+    return b'{"type":"error","error":{"type":"FreeUsageLimitError","message":"quota"}}'
+
+
+def test_is_usage_limit_error() -> None:
+    assert bridge._is_usage_limit_error(
+        httpx.Response(429, content=_usage_limit_body())
+    )
+    assert not bridge._is_usage_limit_error(
+        httpx.Response(200, content=_usage_limit_body())
+    )
+    assert not bridge._is_usage_limit_error(httpx.Response(429))
+    assert not bridge._is_usage_limit_error(
+        httpx.Response(429, content=b'{"error":{"type":"RateLimitError"}}')
+    )
+    assert not bridge._is_usage_limit_error(httpx.Response(429, content=b"not json"))
+
+
+def test_retry_delay_from_header() -> None:
+    resp = httpx.Response(429, headers={"Retry-After": "30"})
+    assert bridge._retry_delay(resp) == 30.0
+
+
+def test_retry_delay_default() -> None:
+    resp = httpx.Response(429)
+    assert bridge._retry_delay(resp) == 5.0
 
 
 def test_forward_headers_strips_hop_by_hop_and_sets_host() -> None:
@@ -77,7 +100,8 @@ def test_forward_returns_upstream_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeClient([httpx.Response(200, content=b"ok")])
-    monkeypatch.setattr(bridge, "_client", lambda cfg: fake)
+    monkeypatch.setattr(bridge, "_get_client", lambda cfg: fake)
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -91,11 +115,11 @@ def test_forward_returns_upstream_response(
     assert fake.last_url == "https://up.test/v1/v1/chat/completions"
 
 
-def test_forward_rotates_and_retries_on_429(
+def test_forward_rotates_and_retries_on_usage_limit_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue: list[httpx.Response] = [
-        httpx.Response(429),
+        httpx.Response(429, content=_usage_limit_body()),
         httpx.Response(200, content=b"recovered"),
     ]
     fake = _FakeClient(queue)
@@ -103,7 +127,8 @@ def test_forward_rotates_and_retries_on_429(
     def make_client(cfg: Config) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(bridge, "_client", make_client)
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
     rotated: list = []
     logged: list[str] = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: (rotated.append(1), True)[1])
@@ -119,11 +144,11 @@ def test_forward_rotates_and_retries_on_429(
     assert any("rotation took" in msg for msg in logged)
 
 
-def test_forward_waits_and_retries_when_rotation_in_progress(
+def test_forward_waits_on_regular_429_without_rotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue: list[httpx.Response] = [
-        httpx.Response(429),
+        httpx.Response(429),  # no FreeUsageLimitError body
         httpx.Response(200, content=b"recovered"),
     ]
     fake = _FakeClient(queue)
@@ -131,27 +156,32 @@ def test_forward_waits_and_retries_when_rotation_in_progress(
     def make_client(cfg: Config) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(bridge, "_client", make_client)
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
+    rotated: list = []
     logged: list[str] = []
-    monkeypatch.setattr(bridge.cascade, "rotate", lambda: False)
+    monkeypatch.setattr(bridge.cascade, "rotate", lambda: (rotated.append(1), True)[1])
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+    monkeypatch.setattr(bridge, "time", bridge.time)  # real time.sleep
 
     resp, client = bridge.forward(_cfg(), _req())
     try:
+        assert rotated == []
         assert resp.status_code == 200
         assert resp.content == b"recovered"
     finally:
         client.close()
-    assert any("waited" in msg for msg in logged)
-    assert not any("rotation took" in msg for msg in logged)
+    assert any("rate limited" in msg for msg in logged)
+    assert not any("rotation" in msg for msg in logged)
 
 
 def test_forward_no_rotate_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        bridge, "_client", lambda cfg: _FakeClient([httpx.Response(429)])
+        bridge, "_get_client", lambda cfg: _FakeClient([httpx.Response(429)])
     )
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -166,13 +196,18 @@ def test_forward_no_rotate_when_disabled(
 def test_forward_429_after_retry_is_returned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    queue: list[httpx.Response] = [httpx.Response(429), httpx.Response(429)]
+    body = _usage_limit_body()
+    queue: list[httpx.Response] = [
+        httpx.Response(429, content=body),
+        httpx.Response(429, content=body),
+    ]
     fake = _FakeClient(queue)
 
     def make_client(cfg: Config) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(bridge, "_client", make_client)
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -191,24 +226,29 @@ def test_forward_retries_configured_status(monkeypatch: pytest.MonkeyPatch) -> N
     def make_client(cfg: Config) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(bridge, "_client", make_client)
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
+    logged: list[str] = []
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
 
     resp, client = bridge.forward(_cfg(bridge_retry_statuses=[503]), _req())
     try:
-        assert rotated == [1]
+        assert rotated == []
         assert resp.status_code == 200
     finally:
         client.close()
+    assert any("rate limited" in msg for msg in logged)
 
 
 def test_forward_ignores_non_configured_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        bridge, "_client", lambda cfg: _FakeClient([httpx.Response(503)])
+        bridge, "_get_client", lambda cfg: _FakeClient([httpx.Response(503)])
     )
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -223,10 +263,11 @@ def test_forward_ignores_non_configured_status(
 def test_forward_respects_requested_attempt_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    body = _usage_limit_body()
     queue: list[httpx.Response] = [
-        httpx.Response(429),
-        httpx.Response(429),
-        httpx.Response(429),
+        httpx.Response(429, content=body),
+        httpx.Response(429, content=body),
+        httpx.Response(429, content=body),
         httpx.Response(200),
     ]
     fake = _FakeClient(queue)
@@ -234,7 +275,8 @@ def test_forward_respects_requested_attempt_count(
     def make_client(cfg: Config) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(bridge, "_client", make_client)
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -248,8 +290,9 @@ def test_forward_respects_requested_attempt_count(
 
 def test_forward_zero_attempts_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        bridge, "_client", lambda cfg: _FakeClient([httpx.Response(429)])
+        bridge, "_get_client", lambda cfg: _FakeClient([httpx.Response(429)])
     )
+    bridge._shared_client = None
     rotated: list = []
     monkeypatch.setattr(bridge.cascade, "rotate", lambda: rotated.append(1))
 
@@ -268,9 +311,59 @@ def test_fetch_raises_upstream_error_on_network_failure(
         def request(self, method: str, url: str, **kw: object) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(bridge, "_client", lambda cfg: BoomClient())
+    monkeypatch.setattr(bridge, "_get_client", lambda cfg: BoomClient())
+    bridge._shared_client = None
     with pytest.raises(bridge.UpstreamError):
         bridge.forward(_cfg(), _req())
+
+
+def test_shared_client_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge._shared_client = None
+    fake = _FakeClient([httpx.Response(200), httpx.Response(200)])
+    monkeypatch.setattr(bridge, "_client", lambda cfg: fake)
+
+    _, c1 = bridge.forward(_cfg(), _req())
+    _, c2 = bridge.forward(_cfg(), _req())
+    assert c1 is c2
+    c1.close()
+
+
+def test_reset_client_closes_and_discards() -> None:
+    fake = _FakeClient([httpx.Response(200)])
+    bridge._shared_client = fake  # type: ignore[assignment]
+    bridge._reset_client()
+    assert bridge._shared_client is None
+    assert fake.closed
+
+
+def test_send_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    status_codes: list[int] = []
+    headers: list[tuple[str, str]] = []
+
+    handler = SimpleNamespace(
+        send_response=lambda code: status_codes.append(code),
+        send_header=lambda k, v: headers.append((k, v)),
+        end_headers=lambda: None,
+        wfile=BytesIO(),
+    )
+    # Capture wfile writes
+
+    class FakeWfile:
+        def __init__(self) -> None:
+            self.data = bytearray()
+
+        def write(self, chunk: bytes) -> None:
+            self.data.extend(chunk)
+
+    handler.wfile = FakeWfile()  # type: ignore[assignment]
+    bridge._send_502(handler, "boom")
+    assert status_codes == [502]
+    assert any(k == "Content-Type" for k, _ in headers)
+    payload = bytes(handler.wfile.data)  # type: ignore[attr-defined]
+    assert b"boom" in payload
 
 
 def test_base_url_uses_configured_port() -> None:
@@ -443,7 +536,6 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
-    monkeypatch.setattr(bridge, "console_echo", lambda: None)
     monkeypatch.setattr(
         bridge.console, "print", lambda *a, **k: console_printed.append(a[0])
     )
@@ -474,7 +566,6 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
-    monkeypatch.setattr(bridge, "console_echo", lambda: None)
     monkeypatch.setattr(
         bridge.console, "print", lambda *a, **k: console_printed.append(a[0])
     )
