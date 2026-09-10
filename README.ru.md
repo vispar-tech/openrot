@@ -92,7 +92,6 @@ poetry run openrot stop
 | `openrot warp on\|off\|install` | Включить/выключить (подключить/отключить) WARP |
 | `openrot warp status [--json]` | Статус WARP |
 | `openrot run -- <cmd>` | Выполнить команду с переменными окружения прокси |
-| `openrot probe <url>` | Прогнать `url` через активный стек, показывая каждый этап |
 
 ## opencode (bridge)
 
@@ -260,9 +259,8 @@ parse (дедуп vless:// / proto://host:port)
 **топ-20** (`TOP_LIMIT`) на профиль.
 
 Прогресс печатается вживую: `update` показывает постадийный счётчик/бар
-(`verify parse: 3/3`, `verify probe: 12/100`), `openrot probe <url>` печатает
-те же стадии строками. `openrot test` заново проверяет опубликованные ноды
-тем же пайплайном.
+(`verify parse: 3/3`, `verify probe: 12/100`). `openrot test` заново проверяет
+опубликованные ноды тем же пайплайном.
 
 ## Стратегии
 

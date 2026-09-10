@@ -38,7 +38,7 @@ def test_verify_progress_reports_each_node(monkeypatch: pytest.MonkeyPatch) -> N
         lambda host, port, timeout: host == "1.1.1.1",
     )
     monkeypatch.setattr(
-        verify.free,
+        verify.proxy,
         "probe_targets",
         lambda p, h, port, timeout, url=None: ([5.0], None),
     )
@@ -210,7 +210,7 @@ def test_verify_proxy_pool(monkeypatch: pytest.MonkeyPatch) -> None:
         verify, "tcp_reachable", lambda host, port, timeout: host == "1.1.1.1"
     )
     monkeypatch.setattr(
-        verify.free,
+        verify.proxy,
         "probe_targets",
         lambda p, h, port, timeout, url=None: ([5.0], None),
     )
@@ -258,7 +258,7 @@ def test_verify_proxy_pool_forwards_urltest_url(
         seen["url"] = url
         return ([5.0], None)
 
-    monkeypatch.setattr(verify.free, "probe_targets", fake_probe)
+    monkeypatch.setattr(verify.proxy, "probe_targets", fake_probe)
     result = verify.verify_proxy_pool(
         [("http", "1.1.1.1", 80)],
         3.0,

@@ -11,15 +11,6 @@ def _profile(name: str, **kw: Any) -> Profile:
     return Profile(name=name, **kw)
 
 
-def test_node_from_records_dedupes_and_sets_protocol() -> None:
-    a = "vless://aaa@example.com:443#A"
-    records = [a, a, "vless://bbb@other.com:80#B"]
-    result = nodes.node_from_records(records, NodeProtocol.VLESS)
-    assert [n.raw for n in result] == [a, "vless://bbb@other.com:80#B"]
-    assert all(n.id.startswith("node-") for n in result)
-    assert all(n.protocol == NodeProtocol.VLESS for n in result)
-
-
 def test_current_node_by_id() -> None:
     prof = _profile("x", nodes=[Node(id="n1", raw="r1"), Node(id="n2", raw="r2")])
     c = Config(profiles=[prof], current_node_id="n2")

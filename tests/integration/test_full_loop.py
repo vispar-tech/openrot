@@ -1,8 +1,8 @@
 """Integration tests: full CLI loop against real sources and real sing-box.
 
-The happy path exercises `profile add` -> `update` -> `test` -> `probe`
-(assert a real egress IP), then fakes a node failure (kill the serving
-sing-box + mark the current node DEAD) and verifies `rotate`. External
+The happy path exercises `profile add` -> `update` -> `test` (assert a real
+egress IP through the local proxy), then fakes a node failure (kill the
+serving sing-box + mark the current node DEAD) and verifies `rotate`. External
 sources and the network are not under our control, so the test skips
 gracefully when sing-box is missing or no node stays alive.
 """
@@ -40,7 +40,7 @@ RELAY_BLACK = (
 )
 PROXY_PROXIFLY = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 TRIM_PER_PROFILE = 6
-EGRESS_RE = re.compile(r"egress ip: (\d+\.\d+\.\d+\.\d+)")
+EGRESS_RE = re.compile(r'"ip":\s*"(\d+\.\d+\.\d+\.\d+)"')
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -139,11 +139,18 @@ def _alive_nodes(cfg_path: Path) -> list[Node]:
 
 
 def _expect_egress(basedir: Path, port: int) -> str:
-    proc = _openrot(basedir, port, "probe", EGRESS_URL, timeout=120)
-    _skip_on_transient_error(proc)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    match = EGRESS_RE.search(proc.stdout)
-    assert match, proc.stdout
+    env = _env(basedir, port)
+    body = subprocess.run(  # noqa: S603
+        ["curl", "-s", "-x", f"http://127.0.0.1:{port}", EGRESS_URL],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    _skip_on_transient_error(body)
+    assert body.returncode == 0, body.stdout + body.stderr
+    match = EGRESS_RE.search(body.stdout)
+    assert match, body.stdout
     return match.group(1)
 
 

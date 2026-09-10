@@ -1,18 +1,18 @@
 import os
 import signal
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
 from openrot import config as cfg
 from openrot.config import Node, NodeProtocol
+from openrot.core.pid import PidFile
 from openrot.core.singbox import (
     generate_free_config,
     generate_singbox_config,
     write_config,
 )
-from openrot.providers import free
+from openrot.providers import proxy
 from openrot.providers.vless import VlessNode, parse_vless
 
 
@@ -47,7 +47,7 @@ def start_free_proxy(
 def start_node(node: Node, port: int, singbox_bin: str) -> int:
     """Start any node by protocol: relay (sing-box) or proxy (http/socks5 outbound)."""
     if node.protocol in (NodeProtocol.HTTP, NodeProtocol.SOCKS5):
-        host, remote_port = free.host_port(node.raw)
+        host, remote_port = proxy.host_port(node.raw)
         if host is None or remote_port is None:
             raise RuntimeError(f"invalid proxy node address: {node.raw}")
         return start_free_proxy(
@@ -73,11 +73,7 @@ def is_running(pid: int) -> bool:
 
 def _write_pid(pid: int, path: Path) -> None:
     """Write `pid` to `path` atomically with 0600 permissions."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        f.write(str(pid))
-    Path(tmp).replace(path)
+    PidFile(path).save(pid)
 
 
 def save_pid(pid: int, path: Path = cfg.PID_PATH) -> None:
@@ -87,12 +83,7 @@ def save_pid(pid: int, path: Path = cfg.PID_PATH) -> None:
 
 def load_pid(path: Path = cfg.PID_PATH) -> int | None:
     """Read a proxy pid from `path`, or None when absent or invalid."""
-    if not path.exists():
-        return None
-    try:
-        return int(path.read_text().strip())
-    except ValueError:
-        return None
+    return PidFile(path).load()
 
 
 def save_daemon_pid(pid: int, path: Path = cfg.DAEMON_PID_PATH) -> None:
@@ -102,12 +93,7 @@ def save_daemon_pid(pid: int, path: Path = cfg.DAEMON_PID_PATH) -> None:
 
 def load_daemon_pid(path: Path = cfg.DAEMON_PID_PATH) -> int | None:
     """Read the daemon pid from `path`, or None when absent or invalid."""
-    if not path.exists():
-        return None
-    try:
-        return int(path.read_text().strip())
-    except ValueError:
-        return None
+    return PidFile(path).load()
 
 
 def stop_proxy(pid: int | None = None) -> bool:

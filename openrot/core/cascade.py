@@ -10,6 +10,8 @@ from openrot import config as cfg
 from openrot import log, signals
 from openrot.config import ActiveLevel, Config, Node, NodeStatus, Strategy
 from openrot.core import daemon, health, nodes, proxy, refresh, rotator
+from openrot.core.constants import IPIFY_URL
+from openrot.core.http import make_client
 from openrot.providers import warp
 
 console = Console()
@@ -84,13 +86,13 @@ def start_warp(foreground: bool) -> bool:
     """Connect WARP in proxy mode and front it with the local mixed proxy."""
     cfg_obj = cfg.load_config()
     if not cfg_obj.warp_enabled:
-        events.info("warp disabled in config, using node chain")
+        events.info("[cascade] warp disabled in config, using node chain")
         return False
     if not warp.is_installed():
-        events.info("WARP: available on host only (not found). Skipping.")
+        events.info("[cascade] WARP not available on this host, skipping")
         return False
     if not warp.connect():
-        events.warning("warp connect failed; falling back to node chain")
+        events.warning("[cascade] warp connect failed; falling back to node chain")
         return False
 
     w_host, w_port = warp.proxy_address()
@@ -100,19 +102,19 @@ def start_warp(foreground: bool) -> bool:
         )
     except FileNotFoundError:
         events.warning(
-            "sing-box not found (%s). Install it: brew install sing-box",
+            "[cascade] sing-box not found (%s). Install it: brew install sing-box",
             cfg_obj.singbox_bin,
         )
         return False
     except RuntimeError as exc:
-        events.warning("warp listener failed to start: %s", exc)
+        events.warning("[cascade] warp listener failed to start: %s", exc)
         return False
     proxy.save_pid(pid)
     cfg_obj.active_level = ActiveLevel.WARP
     cfg.save_config(cfg_obj)
     ip = warp.current_ip()
     events.info(
-        "warp active in proxy mode (127.0.0.1:%d -> socks5://%s:%d, ip=%s)",
+        "[cascade] warp active in proxy mode (127.0.0.1:%d -> socks5://%s:%d, ip=%s)",
         cfg_obj.port,
         w_host,
         w_port,
@@ -127,11 +129,13 @@ def start_node(foreground: bool) -> None:
     """Start the node chain: pick from profiles by priority."""
     cfg_obj = cfg.load_config()
     if not cfg_obj.all_nodes():
-        events.warning("no nodes configured. Add a profile via 'openrot profile add'")
+        events.warning(
+            "[cascade] no nodes configured. Add a profile via 'openrot profile add'"
+        )
         raise SystemExit(1)
 
     if not any(n.status == NodeStatus.ALIVE for n in cfg_obj.all_nodes()):
-        events.info("node: no alive node yet, running health check...")
+        events.info("[cascade] no alive node yet, running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         cfg.save_config(cfg_obj)
@@ -139,7 +143,7 @@ def start_node(foreground: bool) -> None:
     node = rotator.pick(cfg_obj)
     if node is None:
         events.warning(
-            "no alive node available. Run 'openrot test' or 'openrot update'"
+            "[cascade] no alive node available. Run 'openrot test' or 'openrot update'"
         )
         raise SystemExit(1)
 
@@ -149,12 +153,12 @@ def start_node(foreground: bool) -> None:
         pid = launch(cfg_obj, node)
     except FileNotFoundError:
         events.warning(
-            "sing-box not found (%s). Install it: brew install sing-box",
+            "[cascade] sing-box not found (%s). Install it: brew install sing-box",
             cfg_obj.singbox_bin,
         )
         raise SystemExit(1) from None
     except RuntimeError as exc:
-        events.warning("%s", exc)
+        events.warning("[cascade] %s", exc)
         raise SystemExit(1) from exc
 
     if foreground:
@@ -165,7 +169,7 @@ def start_node(foreground: bool) -> None:
         node_health_loop()
         return
 
-    events.info("proxy started, pid %d, 127.0.0.1:%d", pid, cfg_obj.port)
+    events.info("[cascade] proxy started, pid %d, 127.0.0.1:%d", pid, cfg_obj.port)
 
 
 def _commit_health(fresh: cfg.Config, node_id: str, alive: bool) -> tuple[bool, int]:
@@ -195,7 +199,7 @@ def node_health_loop() -> None:
         current = nodes.current_node(snapshot)
         if current is None:
             if snapshot.active_level == ActiveLevel.NODE:
-                events.warning("current node no longer in the pool, rotating")
+                events.warning("[cascade] current node no longer in the pool, rotating")
                 with contextlib.suppress(SystemExit):
                     rotate()
             continue
@@ -206,7 +210,7 @@ def node_health_loop() -> None:
         ) or (False, 0)
         if reached:
             label = nodes.node_label(current)
-            events.warning("node %s failed %d times, rotating", label, fails)
+            events.warning("[cascade] node %s failed %d times, rotating", label, fails)
             with contextlib.suppress(SystemExit):
                 rotate()
 
@@ -218,7 +222,7 @@ def warp_health_loop() -> None:
         time.sleep(cfg_obj.health_interval)
         if warp.is_connected():
             continue
-        events.warning("warp dropped; falling back to node chain")
+        events.warning("[cascade] warp dropped; falling back to node chain")
         proxy.stop_proxy()
         start_node(True)
         return
@@ -256,9 +260,9 @@ def _rotate_inner(first: bool) -> None:
     if cfg_obj.active_level == ActiveLevel.WARP:
         if warp.rotate():
             ip = warp.current_ip()
-            events.info("warp rotated, ip=%s", ip or "-")
+            events.info("[cascade] warp rotated, ip=%s", ip or "-")
         else:
-            events.warning("warp rotation failed")
+            events.warning("[cascade] warp rotation failed")
         return
 
     current = nodes.current_node(cfg_obj)
@@ -267,7 +271,7 @@ def _rotate_inner(first: bool) -> None:
     cfg_obj.current_node_id = None
 
     if not any(n.status == NodeStatus.ALIVE for n in cfg_obj.all_nodes()):
-        events.info("node: no alive node, running health check...")
+        events.info("[cascade] no alive node, running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         cfg.save_config(cfg_obj)
@@ -280,7 +284,7 @@ def _rotate_inner(first: bool) -> None:
     else:
         node = rotator.next_node(cfg_obj, current_id)
     if node is None:
-        events.info("node: no alive alternative, re-running health check...")
+        events.info("[cascade] no alive alternative, re-running health check...")
         health.test_all(cfg_obj)
         cfg_obj = cfg.load_config()
         node = (
@@ -290,21 +294,22 @@ def _rotate_inner(first: bool) -> None:
         )
         cfg.save_config(cfg_obj)
     if node is None:
-        events.warning("rotation failed: no alive node available")
+        events.warning("[cascade] rotation failed: no alive node available")
         raise SystemExit(1)
 
     try:
         pid = launch(cfg_obj, node)
     except RuntimeError as exc:
-        events.warning("%s", exc)
+        events.warning("[cascade] %s", exc)
         raise SystemExit(1) from exc
-    events.info("rotated to node %s (pid %d)", nodes.node_label(node), pid)
+    events.info("[cascade] rotated to node %s (pid %d)", nodes.node_label(node), pid)
 
 
 def stop() -> None:
     """Stop the cascade daemon and the current level: WARP or local proxy."""
     if daemon.stop(cfg.DAEMON_PID_PATH):
         console.print("daemon stopped")
+        events.info("[cascade] daemon stopped")
     cfg_obj = cfg.load_config()
     if cfg_obj.active_level == ActiveLevel.WARP:
         proxy.stop_proxy()
@@ -312,12 +317,14 @@ def stop() -> None:
         cfg_obj.active_level = ActiveLevel.NONE
         cfg.save_config(cfg_obj)
         console.print("WARP disconnected")
+        events.info("[cascade] WARP disconnected")
         return
     if proxy.stop_proxy():
         cfg_obj.current_node_id = None
         cfg_obj.active_level = ActiveLevel.NONE
         cfg.save_config(cfg_obj)
         console.print("Proxy stopped")
+        events.info("[cascade] proxy stopped")
     else:
         console.print("Proxy not running")
 
@@ -336,10 +343,10 @@ def level_serving(cfg_obj: Config) -> bool:
 def probe_connectivity(cfg_obj: Config) -> dict[str, object]:
     """Fetch the egress IP through the local proxy to verify connectivity."""
     try:
-        with httpx.Client(
+        with make_client(
             proxy=f"http://127.0.0.1:{cfg_obj.port}", timeout=15
         ) as client:
-            resp = client.get("https://api.ipify.org?format=json")
+            resp = client.get(IPIFY_URL)
             resp.raise_for_status()
             ip = resp.json().get("ip", "?")
             return {"ok": True, "ip": ip}

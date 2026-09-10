@@ -4,8 +4,11 @@ The file historically also housed the ``start bridge`` helpers; those were
 merged into ``openrot.core.bridge``, and their tests live here too.
 """
 
+import gzip
 import socket
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self
 
 import httpx
@@ -82,8 +85,11 @@ class _FakeClient:
         self.closed = False
         self.last_url: str | None = None
 
-    def request(self, method: str, url: str, **kw: object) -> httpx.Response:
-        self.last_url = url
+    def build_request(self, method: str, url: str, **kw: object) -> httpx.Request:
+        return httpx.Request(method, url, **kw)
+
+    def send(self, request: httpx.Request, *, stream: bool = True) -> httpx.Response:
+        self.last_url = str(request.url)
         return self._responses.pop(0)
 
     def close(self) -> None:
@@ -113,6 +119,25 @@ def test_forward_returns_upstream_response(
         client.close()
     assert rotated == []
     assert fake.last_url == "https://up.test/v1/v1/chat/completions"
+
+
+def test_fetch_forces_accept_encoding_identity() -> None:
+    captured: dict[str, object] = {}
+
+    class SpyClient:
+        def build_request(self, method: str, url: str, **kw: object) -> httpx.Request:
+            return httpx.Request(method, url, **kw)
+
+        def send(
+            self, request: httpx.Request, *, stream: bool = True
+        ) -> httpx.Response:
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(200, content=b"ok")
+
+    bridge._fetch(SpyClient(), _cfg(), _req())
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers.get("accept-encoding") == "identity"
 
 
 def test_forward_rotates_and_retries_on_usage_limit_error(
@@ -308,12 +333,17 @@ def test_fetch_raises_upstream_error_on_network_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class BoomClient:
-        def request(self, method: str, url: str, **kw: object) -> httpx.Response:
+        def build_request(self, method: str, url: str, **kw: object) -> httpx.Request:
+            return httpx.Request(method, url, **kw)
+
+        def send(
+            self, request: httpx.Request, *, stream: bool = True
+        ) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
     monkeypatch.setattr(bridge, "_get_client", lambda cfg: BoomClient())
     bridge._shared_client = None
-    with pytest.raises(bridge.UpstreamError):
+    with pytest.raises(httpx.HTTPError):
         bridge.forward(_cfg(), _req())
 
 
@@ -337,9 +367,6 @@ def test_reset_client_closes_and_discards() -> None:
 
 
 def test_send_502(monkeypatch: pytest.MonkeyPatch) -> None:
-    from io import BytesIO
-    from types import SimpleNamespace
-
     status_codes: list[int] = []
     headers: list[tuple[str, str]] = []
 
@@ -391,10 +418,14 @@ def test_serve_starts_cascade_and_listens(
         def server_close(self) -> None:
             pass
 
-    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: False)
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: False)
     started: list[tuple[bool, bool]] = []
     monkeypatch.setattr(bridge.cascade, "start", lambda f, d: started.append((f, d)))
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
     bridge.serve()
     assert started == [(False, False)]
@@ -412,10 +443,14 @@ def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None
         def server_close(self) -> None:
             pass
 
-    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
     started: list = []
     monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
     bridge.serve()
     assert started == []
@@ -458,13 +493,6 @@ def test_stop_daemon_delegates_to_daemon_stop(
     assert called == [pid_path]
 
 
-def test_running_level_combinations() -> None:
-    assert bridge._running_level(_cfg(), lambda c: True) is False
-    conf = Config(active_level=ActiveLevel.NODE)
-    assert bridge._running_level(conf, lambda c: True) is True
-    assert bridge._running_level(conf, lambda c: False) is False
-
-
 def test_warn_if_exposed_silent_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[str] = []
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
@@ -498,8 +526,12 @@ def test_serve_warns_when_binding_beyond_loopback(
             pass
 
     logged: list[str] = []
-    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     monkeypatch.setattr(bridge.cfg, "listen_address", lambda: "0.0.0.0")
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -531,8 +563,12 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
 
     printed: list[str] = []
     console_printed: list[str] = []
-    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -561,8 +597,12 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
 
     printed: list[str] = []
     console_printed: list[str] = []
-    monkeypatch.setattr(bridge, "_running_level", lambda cfg_obj, check: True)
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_port=7891))
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -577,9 +617,6 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_respond_streams_body_and_skips_hop_by_hop() -> None:
-    from io import BytesIO
-    from types import SimpleNamespace
-
     sent_headers: list[tuple[str, str]] = []
 
     def send_header(key: str, value: str) -> None:
@@ -594,17 +631,72 @@ def test_respond_streams_body_and_skips_hop_by_hop() -> None:
     )
     resp = httpx.Response(
         200,
-        headers={"Content-Type": "text/plain", "Connection": "keep-alive"},
+        headers={
+            "Content-Type": "text/plain",
+            "Content-Length": "5",
+            "Connection": "keep-alive",
+        },
         content=b"hello",
     )
     bridge._respond(handler, resp)
     assert wfile.getvalue() == b"hello"
     assert not any(k.lower() == "connection" for k, _ in sent_headers)
+    assert any(h.lower() == "content-length" and v == "5" for h, v in sent_headers)
+
+
+def test_respond_chunks_when_no_content_length() -> None:
+    sent_headers: list[tuple[str, str]] = []
+
+    def send_header(key: str, value: str) -> None:
+        sent_headers.append((key, value))
+
+    handler = SimpleNamespace(
+        send_response=lambda code: None,
+        send_header=send_header,
+        end_headers=lambda: None,
+        wfile=BytesIO(),
+    )
+    resp = httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content=b"data: x\n\n",
+    )
+    resp.headers.pop("content-length")
+    bridge._respond(handler, resp)
+    assert bytes(handler.wfile.getvalue()) == b"9\r\ndata: x\n\n\r\n0\r\n\r\n"
+    assert any(
+        k.lower() == "transfer-encoding" and v == "chunked" for k, v in sent_headers
+    )
+
+
+def test_respond_skips_content_encoding_when_body_decoded() -> None:
+    sent_headers: list[tuple[str, str]] = []
+
+    def send_header(key: str, value: str) -> None:
+        sent_headers.append((key, value))
+
+    handler = SimpleNamespace(
+        send_response=lambda code: None,
+        send_header=send_header,
+        end_headers=lambda: None,
+        wfile=BytesIO(),
+    )
+    resp = httpx.Response(
+        200,
+        headers={
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+            "Content-Length": "123",
+        },
+        content=gzip.compress(b'{"ok":true}'),
+    )
+    bridge._respond(handler, resp)
+    assert bytes(handler.wfile.getvalue()) == b'b\r\n{"ok":true}\r\n0\r\n\r\n'
+    assert not any(k.lower() == "content-encoding" for k, _ in sent_headers)
+    assert not any(k.lower() == "content-length" for k, _ in sent_headers)
 
 
 def test_respond_survives_broken_pipe() -> None:
-    from types import SimpleNamespace
-
     class BoomWfile:
         def write(self, chunk: bytes) -> None:
             raise BrokenPipeError
@@ -622,8 +714,6 @@ def test_respond_survives_broken_pipe() -> None:
 def test_handler_returns_502_on_upstream_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from types import SimpleNamespace
-
     status: list[int] = []
     written: list[bytes] = []
     headers: list[tuple[str, str]] = []
@@ -640,7 +730,7 @@ def test_handler_returns_502_on_upstream_error(
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
 
     def boom(cfg_obj: object, request: object, **kwargs: object) -> object:
-        raise bridge.UpstreamError("up boom")
+        raise httpx.HTTPError("up boom")
 
     monkeypatch.setattr(bridge, "forward", boom)
     handler._handle("POST")
@@ -651,8 +741,6 @@ def test_handler_returns_502_on_upstream_error(
 def test_handler_logs_request_elapsed_and_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from types import SimpleNamespace
-
     body = b'{"model":"gpt-4o","messages":[{"content":"hello world"}]}'
     handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
     handler.headers = SimpleNamespace(get=lambda k, d=0: len(body), items=list)
@@ -684,11 +772,74 @@ def test_handler_logs_request_elapsed_and_model(
     assert any(k in line for k in ("ms", "s"))
 
 
-def test_handler_rotates_and_retries_after_upstream_error(
+def test_respond_counts_streamed_output_bytes() -> None:
+    """output= reflects real bytes written, not (absent) content-length."""
+    written: list[bytes] = []
+
+    class _Wfile:
+        def write(self, chunk: bytes) -> int:
+            written.append(chunk)
+            return len(chunk)
+
+        def flush(self) -> None:
+            pass
+
+    class _Handler:
+        wfile = _Wfile()
+
+        def send_response(self, code: int) -> None:
+            pass
+
+        def send_header(self, key: str, value: str) -> None:
+            pass
+
+        def end_headers(self) -> None:
+            pass
+
+    resp = httpx.Response(200, content=iter([b"abc", b"de"]), headers={})
+    handler = _Handler()
+    assert bridge._respond(handler, resp) == 5
+    assert written  # body went through wfile
+
+
+def test_handler_logs_status_and_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = b'{"model":"gpt-4o","messages":[{"content":"hi"}]}'
+    req_id = "ses_abc123/msg_a1b2c3d4e5f6g7h8i9j0"
+    handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+    handler.headers = SimpleNamespace(
+        get=lambda k, d="": len(body) if k == "Content-Length" else d,
+        items=lambda: [("x-opencode-request", req_id)],
+    )
+    handler.rfile = SimpleNamespace(read=lambda n: body)
+    handler.path = "/v1/chat/completions"
+    handler.wfile = SimpleNamespace(write=lambda b: None)
+    handler.send_response = lambda code: None
+    handler.send_header = lambda k, v: None
+    handler.end_headers = lambda: None
+
+    logged: list[str] = []
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge, "_respond", lambda handler, resp: 1500)
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+
+    resp = httpx.Response(429, content=b"x")
+    client = _FakeClient([resp])
+
+    def fake_forward(cfg_obj: object, request: object, **kw: object) -> object:
+        return (resp, client)
+
+    monkeypatch.setattr(bridge, "forward", fake_forward)
+    handler._handle("POST")
+
+    line = next(msg for msg in logged if msg.startswith("[bridge] POST"))
+    assert "output=1.5k" in line
+    assert "status=429" in line
+    assert "req=msg_a1b2c3d4e5f6g7h8i9j0" in line
+
+
+def test_handler_retries_without_rotation_after_upstream_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from types import SimpleNamespace
-
     handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
     handler.headers = SimpleNamespace(get=lambda k, d=0: 0, items=list)
     handler.rfile = SimpleNamespace(read=lambda n: b"")
@@ -699,11 +850,13 @@ def test_handler_rotates_and_retries_after_upstream_error(
     handler.end_headers = lambda: None
 
     logged: list[str] = []
-    rotated: list = []
+    warning_called = {"n": 0}
     monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+    monkeypatch.setattr(
+        bridge.events, "warning", lambda msg, *a: warning_called.__setitem__("n", 1)
+    )
     monkeypatch.setattr(bridge, "_respond", lambda handler, resp: None)
-    monkeypatch.setattr(bridge.cascade, "rotate", lambda: (rotated.append(1), True)[1])
 
     resp = httpx.Response(200, content=b"ok")
     client = _FakeClient([resp])
@@ -712,17 +865,16 @@ def test_handler_rotates_and_retries_after_upstream_error(
     def flaky_forward(cfg_obj: object, request: object, **kw: object) -> object:
         calls.append(kw.get("rotate_on_429", True))
         if not calls or len(calls) == 1:
-            raise bridge.UpstreamError("conn drop")
+            raise httpx.HTTPError("conn drop")
         return (resp, client)
 
     monkeypatch.setattr(bridge, "forward", flaky_forward)
     handler._handle("POST")
-    assert len(rotated) == 1
-    assert any("rotation took" in msg for msg in logged)
-    assert any(
-        msg.startswith("[bridge] POST") and ("ms" in msg or "s" in msg)
-        for msg in logged
-    )
+    assert warning_called["n"] == 1
+    assert len(calls) == 2
+    assert calls[0] is True
+    assert calls[1] is False
+    assert not any("rotation" in msg for msg in logged)
 
 
 def test_bridge_server_binds_and_closes() -> None:

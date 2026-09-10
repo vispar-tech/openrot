@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import sys
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin
@@ -35,6 +35,7 @@ from openrot import config as cfg
 from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
+from openrot.core.http import make_client
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
@@ -47,18 +48,67 @@ def _log(msg: str) -> None:
     events.info(msg)
 
 
-# Hop-by-hop headers never forwarded upstream.
-_HOP_BY_HOP = {
-    "connection",
-    "content-length",
-    "transfer-encoding",
-    "host",
-    "proxy-connection",
-}
+def _mask_secret(value: str) -> str:
+    """Mask a credential, keeping only a hint of its prefix and tail."""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}"
 
 
-class UpstreamError(Exception):
-    """Raised when the upstream leg of a bridge request fails."""
+def _debug_request(
+    method: str, path: str, headers: dict[str, str], body: bytes
+) -> None:
+    """Log the incoming request in full to diagnose upstream differences.
+
+    Opt-in via ``OPENROT_DEBUG_REQ=1``; secrets in auth headers are masked.
+    """
+    header_map = {k.lower(): v for k, v in headers.items()}
+    for name in ("authorization", "openai-api-key", "proxy-authorization", "api-key"):
+        if name in header_map:
+            header_map[name] = _mask_secret(header_map[name])
+    dump = " ".join(f"{k}={v}" for k, v in sorted(header_map.items()))
+    events.debug("[bridge][debug] %s %s hdr: %s", method, path, dump)
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError, AttributeError:
+        events.debug("[bridge][debug] body: %r", body[:500])
+        return
+    messages = data.get("messages")
+    messages = messages if isinstance(messages, list) else []
+    tool_names = []
+    for tool in data.get("tools", []) or []:
+        if isinstance(tool, dict):
+            fn = tool.get("function", {})
+            fn_name: str | None = None
+            if isinstance(fn, dict):
+                tool_name = fn.get("name")
+                fn_name = str(tool_name) if tool_name is not None else None
+            if fn_name:
+                tool_names.append(fn_name)
+    messages_chars = sum(
+        len(m.get("content", "")) if isinstance(m, dict) else 0 for m in messages
+    )
+    events.debug(
+        "[bridge][debug] body: model=%s stream=%s max_tokens=%s temperature=%s "
+        "n_messages=%s messages_chars=%s tools=%s",
+        data.get("model"),
+        data.get("stream"),
+        data.get("max_tokens"),
+        data.get("temperature"),
+        len(messages),
+        messages_chars,
+        tool_names or None,
+    )
+
+
+# True hop-by-hop headers, stripped on both legs.
+_HOP_BY_HOP = {"connection", "host", "proxy-connection"}
+
+# Request leg: transport framing is re-created from the raw body by httpx.
+_REQUEST_STRIP = _HOP_BY_HOP | {"transfer-encoding", "content-length"}
+
+# Response leg: framing is re-created below (content-length or chunked).
+_RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
 
 
 def _send_502(handler: BaseHTTPRequestHandler, message: str) -> None:
@@ -90,13 +140,13 @@ class _Request:
 
 def _client(cfg_obj: Config) -> httpx.Client:
     proxy_url = f"http://127.0.0.1:{cfg_obj.port}"
-    return httpx.Client(proxy=proxy_url, timeout=300)
+    return make_client(proxy=proxy_url, timeout=300)
 
 
 def _forward_headers(headers: dict[str, str], host: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in headers.items():
-        if key.lower() in _HOP_BY_HOP:
+        if key.lower() in _REQUEST_STRIP:
             continue
         out[key] = value
     if "content-type" not in {k.lower() for k in out}:
@@ -113,12 +163,16 @@ def _fetch(
     url = upstream_url(cfg_obj, request.path)
     host_header = httpx.URL(url).host  # type: ignore[attr-defined]
     out_headers = _forward_headers(request.headers, host_header or "")
+    # Ask for identity so httpx neither injects its own Accept-Encoding nor
+    # transparently decompresses: the body is then passed through verbatim.
+    out_headers["Accept-Encoding"] = "identity"
     try:
-        return client.request(
+        req = httpx.Request(
             request.method, url, headers=out_headers, content=request.body
         )
+        return client.send(req, stream=True)
     except httpx.HTTPError as exc:
-        raise UpstreamError(str(exc)) from exc
+        raise httpx.HTTPError(str(exc)) from exc
 
 
 _RETRY_DELAY_DEFAULT = 5.0
@@ -202,9 +256,9 @@ def _get_semaphore(cfg_obj: Config) -> threading.Semaphore:
 
 def _log_rotation(rotated: bool, elapsed_s: float) -> None:
     if rotated:
-        _log(f"[warp] rotation took {elapsed_s:.1f}s")
+        _log(f"[bridge] rotation took {elapsed_s:.1f}s")
     else:
-        _log(f"[warp] waited {elapsed_s:.1f}s for in-progress rotation")
+        _log(f"[bridge] waited {elapsed_s:.1f}s for in-progress rotation")
 
 
 def _rotate_and_retry(
@@ -263,23 +317,54 @@ def forward(
     return resp, client
 
 
-def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> None:
-    """Write an upstream response back to the connected client, streaming the body."""
+def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> int:
+    """Write an upstream response back to the connected client, streaming the body.
+
+    Bytes pass through verbatim: with ``Accept-Encoding: identity`` upstream the
+    body matches its headers, so everything is forwarded as-is. Only when a
+    server ignores identity and still sends a content-encoding does httpx
+    decompress — then the stale encoding/length headers are dropped and the
+    decoded body is sent chunked, so the client never sees mismatched framing.
+
+    Returns the number of body bytes actually written (chunk framing excluded)
+    so the request-summary log line reflects the real output size even for
+    chunked/streamed responses, where ``content-length`` is absent.
+    """
+    encodings = list(resp.headers.get_list("content-encoding", split_commas=True))
+    normalized = {enc.lower().strip() for enc in encodings}
+    decoded = bool(normalized.intersection({"gzip", "deflate", "br", "zstd"}))
+    sent = 0
     try:
         handler.send_response(resp.status_code)
         for key, value in resp.headers.items():
-            if key.lower() in _HOP_BY_HOP:
+            if key.lower() in _RESPONSE_STRIP:
+                continue
+            if decoded and key.lower() in {"content-encoding", "content-length"}:
                 continue
             with contextlib.suppress(ValueError, OSError):
                 handler.send_header(key, value)
+        if decoded or not resp.headers.get("content-length"):
+            handler.send_header("Transfer-Encoding", "chunked")
         handler.end_headers()
-        for chunk in resp.iter_bytes():
-            handler.wfile.write(chunk)
+        if decoded or not resp.headers.get("content-length"):
+            for chunk in resp.iter_bytes():
+                handler.wfile.write(f"{len(chunk):x}\r\n".encode())
+                handler.wfile.write(chunk)
+                handler.wfile.write(b"\r\n")
+                sent += len(chunk)
+                handler.wfile.flush()
+            handler.wfile.write(b"0\r\n\r\n")
             handler.wfile.flush()
+        else:
+            for chunk in resp.iter_bytes():
+                handler.wfile.write(chunk)
+                sent += len(chunk)
+                handler.wfile.flush()
     except BrokenPipeError, ConnectionResetError, OSError:
         pass
     finally:
         resp.close()
+    return sent
 
 
 def _is_loopback(host: str) -> bool:
@@ -298,15 +383,11 @@ def warn_if_exposed(host: str) -> None:
     if _is_loopback(host):
         return
     _log(
-        f"SECURITY: bridge binds to {host!r}, reachable from other machines. "
+        f"[bridge] SECURITY: bridge binds to {host!r}, reachable from other machines. "
         "It forwards your Authorization headers, so keep it on 127.0.0.1 "
         "(the default). Open ports to the outside world only if you truly "
         "intend to (Docker port publish / OPENROT_LISTEN)."
     )
-
-
-def _running_level(cfg_obj: cfg.Config, check: Callable[[cfg.Config], bool]) -> bool:
-    return cfg_obj.active_level != ActiveLevel.NONE and check(cfg_obj)
 
 
 def base_url(cfg_obj: cfg.Config) -> str:
@@ -329,7 +410,9 @@ def serve() -> None:
     through the cascade with 429 self-rotation. Ctrl-C stops it.
     """
     cfg_obj = cfg.load_config()
-    if not _running_level(cfg_obj, cascade.level_serving):
+    if not (
+        cfg_obj.active_level != ActiveLevel.NONE and cascade.level_serving(cfg_obj)
+    ):
         console.print("no active level, starting cascade...")
         cascade.start(False, False)
         cfg_obj = cfg.load_config()
@@ -371,6 +454,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     """Forward every request to the configured upstream through the cascade."""
 
     server_version = "openrot-bridge/1"
+    protocol_version = "HTTP/1.1"
 
     def _log_request_console(self, method: str) -> None:
         elapsed_s = self._elapsed_ms / 1000
@@ -396,6 +480,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parts.append(f"time={elapsed_s:.1f}s")
         else:
             parts.append(f"time={self._elapsed_ms:.0f}ms")
+        status = getattr(self, "_status", "")
+        if status:
+            parts.append(f"status={status}")
+        req_id = getattr(self, "_req_id", "")
+        if req_id:
+            parts.append(f"req={req_id}")
         _log(f"[bridge] {' '.join(parts)}")
 
     def _handle(self, method: str) -> None:
@@ -419,37 +509,41 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         self._model = model
         self._prompt_chars = prompt_chars
+        self._req_id = next(
+            (v for k, v in self.headers.items() if k.lower() == "x-opencode-request"),
+            "",
+        ).rsplit("/", 1)[-1]
 
         cfg_obj = cfg.load_config()
         request = _Request(method, self.path, dict(self.headers.items()), body)
+        if os.environ.get("OPENROT_DEBUG_REQ"):
+            _debug_request(method, self.path, request.headers, request.body)
         semaphore = _get_semaphore(cfg_obj)
         t0 = time.monotonic()
         semaphore.acquire()
         try:
             resp, _client = forward(cfg_obj, request)
-        except UpstreamError as exc:
-            events.warning("bridge upstream error, rotating and retrying: %s", exc)
-            t_rotate = time.monotonic()
-            rotated = False
-            with contextlib.suppress(SystemExit):
-                rotated = cascade.rotate()
-            _log_rotation(rotated, time.monotonic() - t_rotate)
+        except httpx.HTTPError as exc:
+            events.warning("[bridge] upstream error, retrying: %s", exc)
             try:
                 cfg_obj = cfg.load_config()
                 resp, _client = forward(cfg_obj, request, rotate_on_429=False)
-            except UpstreamError as retry_exc:
+            except httpx.HTTPError as retry_exc:
                 self._elapsed_ms = (time.monotonic() - t0) * 1000
                 self._output_chars = 0
+                self._status = 502
                 self._log_request_console(method)
                 _send_502(self, str(retry_exc))
                 return
         finally:
             semaphore.release()
-        self._output_chars = int(resp.headers.get("content-length", 0) or 0)
+        sent = 0
         try:
-            _respond(self, resp)
+            sent = _respond(self, resp)
         finally:
             self._elapsed_ms = (time.monotonic() - t0) * 1000
+            self._output_chars = sent
+            self._status = resp.status_code
             self._log_request_console(method)
 
     def do_GET(self) -> None:  # noqa: D102

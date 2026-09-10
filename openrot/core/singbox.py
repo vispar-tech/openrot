@@ -1,23 +1,25 @@
-import contextlib
 import json
 import socket
 import subprocess
 import tempfile
 import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
 
 from openrot import config as cfg
 from openrot import log
+from openrot.core.constants import HEALTH_URL
+from openrot.core.http import get_egress_ip, make_client
 from openrot.providers.vless import VlessNode
 
-HEALTH_URL = "https://www.gstatic.com/generate_204"
+events = log.get_logger()
 
 
-class RealityTLSOptions(BaseModel):
+@dataclass
+class RealityTLSOptions:
     """TLS reality (public key + short id) options."""
 
     enabled: bool = True
@@ -25,14 +27,16 @@ class RealityTLSOptions(BaseModel):
     short_id: str = ""
 
 
-class UTLSOptions(BaseModel):
+@dataclass
+class UTLSOptions:
     """uTLS client fingerprint options."""
 
     enabled: bool = True
     fingerprint: str = "chrome"
 
 
-class TLSOptions(BaseModel):
+@dataclass
+class TLSOptions:
     """TLS options for a VLESS outbound."""
 
     enabled: bool = True
@@ -41,48 +45,53 @@ class TLSOptions(BaseModel):
     utls: UTLSOptions | None = None
 
 
-class TransportOptions(BaseModel):
+@dataclass
+class TransportOptions:
     """WebSocket transport options."""
 
     type: str = "ws"
     path: str = "/"
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = field(default_factory=dict)
 
 
-class VLESSOutbound(BaseModel):
+@dataclass
+class VLESSOutbound:
     """sing-box outbound pointing at a single VLESS server."""
 
-    type: str = "vless"
-    tag: str = "proxy"
     server: str
     server_port: int
     uuid: str
+    type: str = "vless"
+    tag: str = "proxy"
     flow: str = ""
     tls: TLSOptions | None = None
     transport: TransportOptions | None = None
 
 
-class MixedInbound(BaseModel):
+@dataclass
+class MixedInbound:
     """Local mixed (http+socks5) inbound."""
 
+    listen_port: int
     type: str = "mixed"
     tag: str = "mixed-in"
     listen: str = "127.0.0.1"
-    listen_port: int
 
 
-class LogOptions(BaseModel):
+@dataclass
+class LogOptions:
     """sing-box logging options."""
 
     level: str = "warn"
 
 
-class SingBoxConfig(BaseModel):
+@dataclass
+class SingBoxConfig:
     """Minimal sing-box config for a local mixed inbound + vless outbound."""
 
-    log: LogOptions = LogOptions()
     inbounds: list[MixedInbound]
     outbounds: list[VLESSOutbound]
+    log: LogOptions = field(default_factory=LogOptions)
 
 
 def _strip_none(value: Any) -> Any:
@@ -132,7 +141,7 @@ def generate_singbox_config(node: VlessNode, port: int) -> dict[str, object]:
         inbounds=[MixedInbound(listen=cfg.listen_address(), listen_port=port)],
         outbounds=[outbound],
     )
-    return _strip_none(cfg_model.model_dump(mode="json"))
+    return _strip_none(asdict(cfg_model))
 
 
 def generate_free_config(
@@ -215,13 +224,13 @@ def probe_vless(
                 if proc.poll() is not None:
                     err_f.seek(0)
                     stderr_text = err_f.read().decode("utf-8", errors="replace")
-                    log.get_logger().warning(
-                        "sing-box exited during probe (%s): %s",
+                    events.warning(
+                        "[singbox] sing-box exited during probe (%s): %s",
                         proc.returncode,
                         stderr_text.strip(),
                     )
                 return False, None, None
-            with httpx.Client(
+            with make_client(
                 proxy=f"http://127.0.0.1:{port}", timeout=timeout
             ) as client:
                 start = time.monotonic()
@@ -231,18 +240,9 @@ def probe_vless(
                     return False, None, None
                 if 200 <= resp.status_code < 300:
                     latency = round((time.monotonic() - start) * 1000, 1)
-                    egress_ip = _get_egress_ip(client)
+                    egress_ip = get_egress_ip(client)
                     return True, latency, egress_ip
                 return False, None, None
         finally:
             proc.terminate()
             cfg_path.unlink(missing_ok=True)
-
-
-def _get_egress_ip(client: httpx.Client) -> str | None:
-    """Fetch public IP from api.ipify.org through an existing proxy client."""
-    with contextlib.suppress(Exception):
-        resp = client.get("https://api.ipify.org?format=json", timeout=5)
-        if resp.status_code == 200:
-            return resp.json().get("ip")
-    return None

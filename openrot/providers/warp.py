@@ -8,11 +8,12 @@ import httpx
 from rich.console import Console
 
 from openrot import log
+from openrot.core.constants import IPIFY_URL
+from openrot.core.http import make_client
 
 WARP_BIN = "warp-cli"
 WARP_PROXY_HOST = "127.0.0.1"
 WARP_PROXY_PORT = 40000
-IPIFY_URL = "https://api.ipify.org?format=json"
 
 ROTATE_DELAY = float(os.environ.get("OPENROT_WARP_ROTATE_DELAY", "10"))
 ROTATE_MAX_ATTEMPTS = int(os.environ.get("OPENROT_WARP_ROTATE_ATTEMPTS", "5"))
@@ -88,12 +89,12 @@ def connect() -> bool:
     """Bring WARP up in proxy mode and wait until it reports connected."""
     if not is_installed():
         return False
-    events.info("warp: connecting (proxy mode)...")
+    events.info("[warp] connecting (proxy mode)...")
     _, port = proxy_address()
     _run("mode", "proxy")
     _run("proxy", "port", str(port))
     _run("connect")
-    events.info("waiting for WARP connection...")
+    events.info("[warp] waiting for WARP connection...")
     for _ in range(120):
         if is_connected():
             return True
@@ -113,7 +114,7 @@ def current_ip() -> str | None:
     """Fetch the egress IP through the WARP SOCKS proxy, or None on failure."""
     host, port = proxy_address()
     try:
-        with httpx.Client(proxy=f"socks5://{host}:{port}", timeout=10) as client:
+        with make_client(proxy=f"socks5://{host}:{port}", timeout=10) as client:
             resp = client.get(IPIFY_URL)
             resp.raise_for_status()
             return resp.json().get("ip")
@@ -138,7 +139,7 @@ def rotate() -> bool:
 
         if ROTATE_DELAY > 0:
             events.info(
-                "warp: waiting %.0fs before reconnect (attempt %d/%d)",
+                "[warp] waiting %.0fs before reconnect (attempt %d/%d)",
                 ROTATE_DELAY,
                 attempt,
                 ROTATE_MAX_ATTEMPTS,
@@ -146,19 +147,19 @@ def rotate() -> bool:
             time.sleep(ROTATE_DELAY)
 
         if not connect():
-            events.warning("warp: reconnect failed on attempt %d", attempt)
+            events.warning("[warp] reconnect failed on attempt %d", attempt)
             continue
 
         new_ip = current_ip()
         if new_ip and new_ip != old_ip:
             events.info(
-                "warp: IP rotated %s → %s (attempt %d)", old_ip or "?", new_ip, attempt
+                "[warp] IP rotated %s → %s (attempt %d)", old_ip or "?", new_ip, attempt
             )
             return True
 
-        events.info("warp: IP unchanged (%s), retrying...", new_ip or "?")
+        events.info("[warp] IP unchanged (%s), retrying...", new_ip or "?")
 
-    events.warning("warp: rotation exhausted, IP may not have changed")
+    events.warning("[warp] rotation exhausted, IP may not have changed")
     return is_connected()
 
 

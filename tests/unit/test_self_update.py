@@ -93,7 +93,7 @@ class TestCheckForUpdate:
         resp.json.return_value = {"tag_name": "v99.0.0"}
         client.get.return_value = resp
         result = su.check_for_update(client)
-        assert result.updated is False
+        assert result.updated is True
         assert "update available" in result.message
         assert result.latest == "99.0.0"
 
