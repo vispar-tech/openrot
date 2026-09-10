@@ -17,6 +17,7 @@ import httpx
 from openrot import __version__
 from openrot import config as cfg
 from openrot.core import daemon, proxy
+from openrot.core.http import make_client
 
 GH_REPO = "vispar-tech/openrot"
 RELEASE_URL = f"https://api.github.com/repos/{GH_REPO}/releases/latest"
@@ -118,7 +119,7 @@ def check_for_update(client: httpx.Client | None = None) -> UpdateResult:
     """Check if a newer release is available."""
     close = client is None
     if client is None:
-        client = httpx.Client(follow_redirects=True)
+        client = make_client(follow_redirects=True)
     try:
         latest_tag = _fetch_latest_tag(client)
     except Exception as exc:
@@ -146,7 +147,7 @@ def check_for_update(client: httpx.Client | None = None) -> UpdateResult:
     return UpdateResult(
         current=__version__,
         latest=latest_tag.lstrip("v"),
-        updated=False,
+        updated=True,
         message=f"update available: {__version__} -> {latest_tag.lstrip('v')}",
     )
 
@@ -162,7 +163,7 @@ def perform_update(
         _stop_services()
     close = client is None
     if client is None:
-        client = httpx.Client(follow_redirects=True)
+        client = make_client(follow_redirects=True)
     try:
         result = _do_update(client, progress_fn)
     finally:

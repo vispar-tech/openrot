@@ -1,10 +1,12 @@
 from pydantic import BaseModel, ConfigDict, Field
 
+from openrot.core.constants import HEALTH_URL
+
 from .enums import ActiveLevel, Strategy
 from .node import Node
 from .profile import Profile
 
-DEFAULT_URLTEST_URL = "https://www.gstatic.com/generate_204"
+DEFAULT_URLTEST_URL = HEALTH_URL
 DEFAULT_BRIDGE_UPSTREAM = "https://opencode.ai/zen"
 
 TOP_LIMIT = 20  # max nodes kept per profile pool after verification

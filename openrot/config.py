@@ -3,6 +3,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -198,7 +199,7 @@ def save_config(cfg: Config, path: Path = CONFIG_PATH) -> None:
         _save_unlocked(cfg, path)
 
 
-def update_config[T](path: Path, mutator: Callable[[Config], T]) -> T | None:
+def update_config(path: Path, mutator: Callable[[Config], Any]) -> Any:
     """Atomically load the persisted config, apply `mutator`, and save it.
 
     The whole read-modify-write runs under a single file lock, so concurrent

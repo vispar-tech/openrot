@@ -19,7 +19,6 @@ import subprocess
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import TypeVar
 
 from openrot.config import TOP_LIMIT, Node, NodeProtocol, NodeStatus, node_id
 from openrot.core.singbox import (
@@ -27,9 +26,9 @@ from openrot.core.singbox import (
     probe_vless,
     write_config,
 )
-from openrot.providers import free, vless
+from openrot.providers import proxy, vless
 
-MAX_WORKERS = 50
+MAX_WORKERS = 16
 
 CHECK_LISTEN_PORT = 1
 
@@ -37,7 +36,6 @@ Stage = Callable[[str, int, int], None]
 ProgressFn = Callable[[str, int, int], None]
 RelayCandidate = tuple[str, vless.VlessNode]
 ProxyKey = tuple[str, str, int]  # (protocol, host, port)
-T = TypeVar("T")
 
 
 def median(values: list[float]) -> float:
@@ -307,7 +305,7 @@ def verify_proxy_pool(
     )
     results = _run_probe(
         tcp_alive,
-        lambda key: free.probe_targets(key[0], key[1], key[2], timeout, urltest_url),
+        lambda key: proxy.probe_targets(key[0], key[1], key[2], timeout, urltest_url),
         on_stage,
         on_progress,
         max_workers,

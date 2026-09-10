@@ -113,7 +113,6 @@ poetry run openrot stop
 | `openrot warp on\|off\|install` | Enable/connect or disable/disconnect WARP |
 | `openrot warp status [--json]` | Show WARP status |
 | `openrot run -- <cmd>` | Run a command with the proxy env vars set |
-| `openrot probe <url>` | Request `url` through the active stack, showing each stage |
 
 ## opencode (bridge)
 
@@ -280,9 +279,8 @@ in parallel), survivors are ranked by latency (the measured request time) and
 the **best 20** (`TOP_LIMIT`) are published per profile.
 
 Progress is printed live: `update` shows a per-stage counter/bar
-(`verify parse: 3/3`, `verify probe: 12/100`), and `openrot probe <url>` prints
-the same stage counts as plain lines. `openrot test` re-verifies the currently
-published nodes through the same pipeline.
+(`verify parse: 3/3`, `verify probe: 12/100`). `openrot test` re-verifies the
+currently published nodes through the same pipeline.
 
 ## Strategies
 

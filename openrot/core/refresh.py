@@ -10,23 +10,23 @@ from openrot import log
 from openrot.config import Config, Profile, ProfileKind
 from openrot.core import nodes, verify
 from openrot.core.verify import Stage
-from openrot.providers import free, vless
+from openrot.providers import proxy, vless
 
 console = Console()
 events = log.get_logger()
 
 
-def refresh_profile(
-    prof: Profile,
-    cfg_obj: Config,
-    *,
-    on_stage: Stage | None = None,
-    on_progress: verify.ProgressFn | None = None,
-) -> None:
-    """Fetch and replace a profile's nodes from its URL according to its kind."""
-    prof.nodes = fetch_profile_nodes(
-        prof, cfg_obj, on_stage=on_stage, on_progress=on_progress
-    )
+def _default_stage_logger(name: str) -> Stage:
+    """Log a pipeline stage's final tally to the events file.
+
+    Used when a caller (e.g. the scheduler) has no console progress bar:
+    ``[refresh] {name}: {stage} {kept}/{total}``.
+    """
+
+    def cb(stage: str, kept: int, total: int) -> None:
+        events.info("[refresh] %s: %s %d/%d", name, stage, kept, total)
+
+    return cb
 
 
 def fetch_profile_nodes(
@@ -39,18 +39,19 @@ def fetch_profile_nodes(
     """Fetch a profile's nodes from its URL and verify them (no mutation).
 
     Relay pools run the full TCP -> TLS -> sing-box check -> HTTP probe
-    pipeline; free proxy pools only TCP -> HTTP probe. The top vertices by
-    urltest latency are published (capped at ``cfg.top_limit``).
+    pipeline; proxy (http/socks5) pools only TCP -> HTTP probe. The top
+    vertices by urltest latency are published (capped at ``cfg.top_limit``).
     """
+    stage_cb = on_stage or _default_stage_logger(prof.name)
     text = nodes.fetch_text(prof.url)
     if prof.kind == ProfileKind.PROXY:
-        candidates = free.fetch_candidates(text)
+        candidates = proxy.fetch_candidates(text)
         proxy_survivors = verify.verify_proxy_pool(
             candidates,
             cfg_obj.health_timeout,
             urltest_url=cfg_obj.urltest_url,
             limit=cfg_obj.top_limit,
-            on_stage=on_stage,
+            on_stage=stage_cb,
             on_progress=on_progress,
             max_workers=cfg_obj.max_workers,
             deduplicate_by_ip=cfg_obj.deduplicate_by_ip,
@@ -63,7 +64,7 @@ def fetch_profile_nodes(
         cfg_obj.health_timeout,
         urltest_url=cfg_obj.urltest_url,
         limit=cfg_obj.top_limit,
-        on_stage=on_stage,
+        on_stage=stage_cb,
         on_progress=on_progress,
         max_workers=cfg_obj.max_workers,
         deduplicate_by_ip=cfg_obj.deduplicate_by_ip,
@@ -124,5 +125,5 @@ def run_scheduler() -> None:
             )
 
         for name, err in errors.items():
-            events.warning("[%s] refresh failed: %s", name, err)
+            events.warning("[refresh] %s: refresh failed: %s", name, err)
         time.sleep(_tick_interval(cfg.load_config()))

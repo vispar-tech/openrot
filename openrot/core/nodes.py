@@ -1,16 +1,15 @@
 from pathlib import Path
 
-import httpx
-
 from openrot import config as cfg
 from openrot.config import Node, NodeProtocol, Profile
-from openrot.providers import free, vless
+from openrot.core.http import make_client
+from openrot.providers import proxy, vless
 
 
 def fetch_text(source: str) -> str:
     """Read a URL or a local file; raise on anything else."""
     if source.startswith(("http://", "https://")):
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
+        with make_client(timeout=30, follow_redirects=True) as client:
             resp = client.get(source)
             resp.raise_for_status()
             return resp.text
@@ -23,20 +22,6 @@ def fetch_text(source: str) -> str:
 def find_profile(cfg: cfg.Config, name: str) -> Profile | None:
     """Return the profile with the given name, or None."""
     return next((p for p in cfg.profiles if p.name == name), None)
-
-
-def node_from_records(
-    records: list[str], protocol: NodeProtocol = NodeProtocol.VLESS
-) -> list[Node]:
-    """Build deduplicated Node objects from raw record strings."""
-    nodes = []
-    seen: set[str] = set()
-    for rec in records:
-        if rec in seen:
-            continue
-        seen.add(rec)
-        nodes.append(Node(id=cfg.node_id(rec), raw=rec, protocol=protocol))
-    return nodes
 
 
 def current_node(cfg: cfg.Config) -> Node | None:
@@ -60,7 +45,7 @@ def node_label(node: Node) -> str:
 def node_address(node: Node) -> str:
     """Return host:port for a node, or '?' when unparseable."""
     if node.protocol in (NodeProtocol.HTTP, NodeProtocol.SOCKS5):
-        host, port = free.host_port(node.raw)
+        host, port = proxy.host_port(node.raw)
         if host is None or port is None:
             return "?"
         return f"{host}:{port}"

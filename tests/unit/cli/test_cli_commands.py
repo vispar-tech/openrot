@@ -6,6 +6,7 @@ monkeypatched at the `cli` module level so no external tools or network are
 required.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,6 @@ def test_profile_list_empty(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_profile_list_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
 
     monkeypatch.setattr(cli.cfg, "load_config", lambda: Config(profiles=[_profile()]))
     result = runner.invoke(cli.app, ["profile", "list", "--json"])
@@ -169,7 +169,6 @@ def test_test_command_no_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_test_command_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
 
     node = _node()
     cfg_obj = Config(profiles=[_profile(nodes=[node])])
@@ -244,7 +243,6 @@ def test_status_node(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "bridge: stopped" in result.output
 
     # current node reports its position in the queue (index/total)
-    import json
 
     result_json = runner.invoke(cli.app, ["status", "--json"])
     assert result_json.exit_code == 0
@@ -268,7 +266,6 @@ def test_status_warp_json_reports_real_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """warp_connected must reflect an actual probe through WARP, not the flag."""
-    import json
 
     cfg_obj = Config(active_level=ActiveLevel.WARP)
     monkeypatch.setattr(cli.cfg, "load_config", lambda: cfg_obj)
@@ -303,7 +300,6 @@ def test_status_bridge_running_node_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A live bridge shows its URL in the human output and true in JSON."""
-    import json
 
     cfg_obj = Config(
         active_level=ActiveLevel.NODE,
@@ -336,12 +332,12 @@ def test_update(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_refresh(
         p: Profile, cfg_obj: object, on_stage: object = None, on_progress: object = None
-    ) -> None:
-        p.__setattr__("nodes", [])
+    ) -> list[Node]:
         if callable(on_stage):
             on_stage("tcp", 0, 0)
+        return []
 
-    monkeypatch.setattr(cli.refresh, "refresh_profile", fake_refresh)
+    monkeypatch.setattr(cli.refresh, "fetch_profile_nodes", fake_refresh)
     monkeypatch.setattr(cli.cfg, "save_config", lambda c, path=None: None)
     result = runner.invoke(cli.app, ["update"])
     assert result.exit_code == 0
@@ -406,66 +402,6 @@ def test_status_verbose_shows_diagnostics(
     assert "proxy" in result.output
 
 
-def test_probe_serving(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    cfg_obj = Config(
-        active_level=ActiveLevel.NODE, current_node_id="n1", profiles=[_profile()]
-    )
-    monkeypatch.setattr(cli.cfg, "load_config", lambda: cfg_obj)
-    monkeypatch.setattr(cli.warp, "is_installed", lambda: False)
-    monkeypatch.setattr(cli.cascade, "level_serving", lambda c: True)
-    monkeypatch.setattr(cli.proxy, "load_pid", lambda: 1)
-    monkeypatch.setattr(cli.node_ops, "node_label", lambda n: "label")
-
-    class _Resp:
-        status_code = 200
-        reason_phrase = "OK"
-        content = b"{}"
-        elapsed = type("E", (), {"total_seconds": lambda s: 0.1})()
-
-        def json(self) -> dict[str, str]:
-            return {"ip": "1.2.3.4"}
-
-        def raise_for_status(self) -> None:
-            return None
-
-    monkeypatch.setattr(cli.probe_core.httpx.Client, "get", lambda self, url: _Resp())
-    result = runner.invoke(cli.app, ["probe", "https://example.test"])
-    assert result.exit_code == 0
-    assert "egress ip: 1.2.3.4" in result.output
-
-
-def test_probe_runs_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = _node()
-    node.status = NodeStatus.UNKNOWN
-    cfg_obj = Config(active_level=ActiveLevel.NODE, profiles=[_profile(nodes=[node])])
-    monkeypatch.setattr(cli.cfg, "load_config", lambda: cfg_obj)
-    monkeypatch.setattr(cli.warp, "is_installed", lambda: False)
-    monkeypatch.setattr(cli.cascade, "level_serving", lambda c: False)
-    monkeypatch.setattr(cli.cascade, "start_node", lambda foreground: None)
-    monkeypatch.setattr(cli.node_ops, "node_label", lambda n: "label")
-    monkeypatch.setattr(cli.proxy, "load_pid", lambda: 123)
-    monkeypatch.setattr(cli.rotator, "pick", lambda c: node)
-    monkeypatch.setattr(cli.cfg, "save_config", lambda c, path=None: None)
-
-    def fake_test_all(c: Config, on_stage: object = None) -> int:
-        assert on_stage is not None
-        for n in c.all_nodes():
-            n.status = NodeStatus.ALIVE
-            n.latency_ms = 5.0
-        if callable(on_stage):
-            on_stage("tcp", 1, 1)
-            on_stage("probe", 1, 1)
-        return 1
-
-    monkeypatch.setattr(cli.health, "test_all", fake_test_all)
-    result = runner.invoke(cli.app, ["probe", "https://example.test"])
-    assert result.exit_code == 0
-    assert "verify tcp: 1/1" in result.output
-    assert "verify probe: 1/1" in result.output
-
-
 def test_warp_install_already(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.warp, "is_installed", lambda: True)
     monkeypatch.setattr(cli.warp, "bin_path", lambda: "/usr/bin/warp-cli")
@@ -503,7 +439,6 @@ def test_warp_status(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_warp_status_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
 
     monkeypatch.setattr(cli.cfg, "load_config", lambda: Config(warp_enabled=True))
     monkeypatch.setattr(cli.warp, "status", lambda: WarpStatus.CONNECTED)

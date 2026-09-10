@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 from openrot.providers import vless
@@ -57,8 +59,6 @@ def test_extract_from_text() -> None:
 
 
 def test_extract_from_base64_subscription() -> None:
-    import base64
-
     plain = "vless://a-b@1.1.1.1:80#Base"
     encoded = base64.b64encode(plain.encode()).decode()
     assert vless.extract_from_text(encoded) == [plain]

@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 
+from openrot import config as cfg
 from openrot.config import Config, Node, Profile, ProfileKind
 from openrot.core import refresh
 
@@ -62,7 +63,7 @@ def test_fetch_profile_nodes_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     prof = Profile(name="p", kind=ProfileKind.PROXY, url="https://x.test/list")
     monkeypatch.setattr(refresh.nodes, "fetch_text", lambda url: "http://h:1\n")
     monkeypatch.setattr(
-        refresh.free, "fetch_candidates", lambda text: [("http", "h", 1)]
+        refresh.proxy, "fetch_candidates", lambda text: [("http", "h", 1)]
     )
     monkeypatch.setattr(
         refresh.verify,
@@ -71,6 +72,33 @@ def test_fetch_profile_nodes_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = refresh.fetch_profile_nodes(prof, _cfg_for(prof))
     assert result and result[0].protocol.value == "http"
+
+
+def test_fetch_profile_nodes_no_callback_logs_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler-style call (no on_stage) wires a file logger to stages."""
+    prof = Profile(name="relay", kind=ProfileKind.RELAY, url="https://x.test/sub")
+    seen_stages: list[str] = []
+
+    def fake_verify(*a: object, **k: object) -> list[object]:
+        on_stage = k.get("on_stage")
+        if on_stage is not None:
+            on_stage("probe", 2, 3)  # type: ignore[operator]
+        return []
+
+    monkeypatch.setattr(
+        refresh.nodes, "fetch_text", lambda url: "vless://a@1.1.1.1:80\n"
+    )
+    monkeypatch.setattr(
+        refresh.vless, "extract_from_text", lambda t: ["vless://a@1.1.1.1:80"]
+    )
+    monkeypatch.setattr(refresh.verify, "verify_vless_pool", fake_verify)
+    monkeypatch.setattr(
+        refresh.events, "info", lambda msg, *a: seen_stages.append(msg % a)
+    )
+    refresh.fetch_profile_nodes(prof, _cfg_for(prof))
+    assert "[refresh] relay: probe 2/3" in seen_stages
 
 
 def test_fetch_profile_nodes_forwards_urltest_url(
@@ -120,8 +148,6 @@ def test_commit_refresh_ignores_missing_profile() -> None:
 def test_run_scheduler_fetches_and_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openrot import config as cfg
-
     prof = Profile(
         name="p",
         url="https://x.test/sub",

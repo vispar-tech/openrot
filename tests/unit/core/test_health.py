@@ -1,7 +1,9 @@
 import pytest
 
 from openrot.core.health import check_node, select_node
-from openrot.models import Node, NodeProtocol, NodeStatus, Strategy
+from openrot.core.health import test_all as _test_all
+from openrot.models import Config, Node, NodeProtocol, NodeStatus, Profile, Strategy
+from openrot.providers.vless import ParseError
 
 
 def _node(
@@ -43,9 +45,6 @@ def test_select_returns_none_when_no_alive() -> None:
 
 
 def test_all_updates_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config, Profile
-    from openrot.core.health import test_all
-
     c = Config(
         profiles=[
             Profile(
@@ -61,7 +60,7 @@ def test_all_updates_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
         return [(("r1", object()), 10.0, None)]
 
     monkeypatch.setattr("openrot.core.health.verify.verify_vless_pool", fake_pool)
-    assert test_all(c) == 1
+    assert _test_all(c) == 1
     assert c.all_nodes()[0].status == NodeStatus.ALIVE
     assert c.all_nodes()[0].latency_ms == 10.0
     assert c.all_nodes()[1].status == NodeStatus.UNKNOWN
@@ -69,9 +68,6 @@ def test_all_updates_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_all_passes_on_stage(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config, Profile
-    from openrot.core.health import test_all
-
     c = Config(profiles=[Profile(name="a", nodes=[Node(id="n1", raw="r1")])])
     recorded: list[tuple[str, object, object]] = []
 
@@ -82,14 +78,11 @@ def test_all_passes_on_stage(monkeypatch: pytest.MonkeyPatch) -> None:
         return []
 
     monkeypatch.setattr("openrot.core.health.verify.verify_vless_pool", fake_pool)
-    assert test_all(c, on_stage=lambda *x: recorded.append(x)) == 0
+    assert _test_all(c, on_stage=lambda *x: recorded.append(x)) == 0
     assert recorded == [("tcp", 1, 1)]
 
 
 def test_all_forwards_urltest_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config, Profile
-    from openrot.core.health import test_all
-
     c = Config(profiles=[Profile(name="a", nodes=[Node(id="n1", raw="r1")])])
     c.urltest_url = "https://probe.example/x"
     seen: dict[str, object] = {}
@@ -101,7 +94,7 @@ def test_all_forwards_urltest_url(monkeypatch: pytest.MonkeyPatch) -> None:
         return []
 
     monkeypatch.setattr("openrot.core.health.verify.verify_vless_pool", fake_pool)
-    test_all(c)
+    _test_all(c)
     assert seen["urltest_url"] == "https://probe.example/x"
 
 
@@ -111,28 +104,24 @@ def test_select_urltest_returns_none_without_latencies() -> None:
 
 
 def test_check_node_http_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config
-
     node = _node("n1")
     node.protocol = NodeProtocol.HTTP
-    monkeypatch.setattr("openrot.core.health.free.check_node", lambda n, c: (True, 7.0))
+    monkeypatch.setattr(
+        "openrot.core.health.proxy.check_proxy_node", lambda n, c: (True, 7.0)
+    )
     assert check_node(node, Config()) == (True, 7.0)
 
 
 def test_check_node_socks5_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config
-
     node = _node("n1")
     node.protocol = NodeProtocol.SOCKS5
     monkeypatch.setattr(
-        "openrot.core.health.free.check_node", lambda n, c: (False, None)
+        "openrot.core.health.proxy.check_proxy_node", lambda n, c: (False, None)
     )
     assert check_node(node, Config()) == (False, None)
 
 
 def test_check_node_vless_probes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Config
-
     node = _node("n1")
     parsed = object()
     monkeypatch.setattr("openrot.core.health.parse_vless", lambda raw: parsed)
@@ -145,9 +134,6 @@ def test_check_node_vless_probes(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_check_node_malformed_returns_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openrot.config import Config
-    from openrot.providers.vless import ParseError
-
     node = _node("n1")
     node.protocol = NodeProtocol.VLESS
     monkeypatch.setattr(
@@ -160,9 +146,6 @@ def test_check_node_malformed_returns_dead(
 def test_apply_result_marks_dead_on_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openrot.config import Config, Profile
-    from openrot.core.health import test_all
-
     c = Config(
         fail_threshold=3,
         profiles=[Profile(name="a", nodes=[Node(id="n1", raw="r1", fails=2)])],
@@ -170,6 +153,6 @@ def test_apply_result_marks_dead_on_threshold(
     monkeypatch.setattr(
         "openrot.core.health.verify.verify_vless_pool", lambda *a, **k: []
     )
-    assert test_all(c) == 0
+    assert _test_all(c) == 0
     assert c.all_nodes()[0].status == NodeStatus.DEAD
     assert c.all_nodes()[0].fails == 3

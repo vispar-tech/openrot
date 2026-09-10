@@ -4,14 +4,16 @@ from openrot import log
 from openrot.config import Config, Node, NodeProtocol, NodeStatus, Strategy
 from openrot.core import verify
 from openrot.core.singbox import probe_vless
-from openrot.providers import free
+from openrot.providers import proxy
 from openrot.providers.vless import ParseError, parse_vless
+
+events = log.get_logger()
 
 
 def check_node(node: Node, cfg: Config) -> tuple[bool, float | None]:
     """Probe one node by protocol. Returns (alive, latency_ms)."""
     if node.protocol in (NodeProtocol.HTTP, NodeProtocol.SOCKS5):
-        return free.check_node(node, cfg)
+        return proxy.check_proxy_node(node, cfg)
     try:
         venode = parse_vless(node.raw)
     except ParseError:
@@ -68,7 +70,7 @@ def test_all(
             )
 
     if proxy_nodes:
-        candidates = free.fetch_candidates("\n".join(n.raw for n in proxy_nodes))
+        candidates = proxy.fetch_candidates("\n".join(n.raw for n in proxy_nodes))
         proxy_survivors = verify.verify_proxy_pool(
             candidates,
             cfg.health_timeout,
@@ -84,7 +86,7 @@ def test_all(
             for (proto, host, port), latency, egress_ip in proxy_survivors
         }
         for node in proxy_nodes:
-            parsed = free.parse_proxy(node.raw)
+            parsed = proxy.parse_proxy(node.raw)
             entry = None if parsed is None else proxy_ok.get(parsed)
             alive_count += _apply_result(
                 node,
@@ -97,7 +99,7 @@ def test_all(
     total_output = len(vless_survivors) + len(proxy_survivors)
     dedup_dropped = total_input - total_output
     if dedup_dropped > 0:
-        log.get_logger().info("dedup: removed %d duplicate-IP nodes", dedup_dropped)
+        events.info("[health] dedup: removed %d duplicate-IP nodes", dedup_dropped)
 
     return alive_count
 

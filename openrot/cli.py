@@ -21,7 +21,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from openrot import __version__, opencode, self_update, signals
+from openrot import __version__, log, opencode, self_update, signals
 from openrot import config as cfg
 from openrot.config import (
     ActiveLevel,
@@ -31,7 +31,6 @@ from openrot.config import (
 )
 from openrot.core import bridge, cascade, health, proxy, refresh, rotator, verify
 from openrot.core import nodes as node_ops
-from openrot.core import probe as probe_core
 from openrot.providers import warp
 
 app = typer.Typer(
@@ -50,6 +49,7 @@ profile_app = typer.Typer(
 )
 app.add_typer(profile_app, name="profile")
 console = Console()
+events = log.get_logger()
 
 
 @contextmanager
@@ -117,6 +117,7 @@ def profile_add(
     console.print(
         f"[green]Added profile '{name}' ({kind.value}, priority {priority})[/green]"
     )
+    events.info("[profile] added '%s' (%s, priority %d)", name, kind.value, priority)
 
 
 @profile_app.command("list")
@@ -183,6 +184,7 @@ def profile_remove(
     cfg_obj.profiles = [p for p in cfg_obj.profiles if p.name != name]
     cfg.save_config(cfg_obj)
     console.print(f"[green]Removed profile '{name}'[/green]")
+    events.info("[profile] removed '%s'", name)
 
 
 @profile_app.command("set")
@@ -218,6 +220,13 @@ def profile_set(
         raise typer.Exit(code=1)
     cfg.save_config(cfg_obj)
     console.print(f"[green]Updated profile '{name}'[/green]")
+    events.info(
+        "[profile] updated '%s' (priority=%s, interval=%s, enabled=%s)",
+        name,
+        priority,
+        interval,
+        enabled,
+    )
 
 
 @app.command("list")
@@ -656,7 +665,7 @@ def update(
         try:
             with progress:
                 report_stage, report_live = _progress_reports(progress, bar)
-                refresh.refresh_profile(
+                prof.nodes = refresh.fetch_profile_nodes(
                     prof,
                     cfg_obj,
                     on_stage=report_stage,
@@ -719,12 +728,6 @@ def _progress_reports(
     return report_stage, report_live
 
 
-@app.command("probe")
-def probe(url: str) -> None:
-    """Request url through the active stack (WARP or node chain), step by step."""
-    probe_core.run(url)
-
-
 @app.command("config")
 def config_edit() -> None:
     """Open the config file in $EDITOR (default vim)."""
@@ -750,6 +753,7 @@ def provider_cmd(
     new_state = opencode.toggle(action=action, path=Path(config))
     status = "[green]enabled[/green]" if new_state else "[red]disabled[/red]"
     console.print(f"Provider {status}")
+    events.info("[provider] %s", "enabled" if new_state else "disabled")
 
 
 warp_app = typer.Typer(
@@ -780,8 +784,10 @@ def warp_on() -> None:
         ip = warp.current_ip()
         suffix = f", IP {ip}" if ip else ""
         console.print(f"WARP [green]enabled and connected[/green]{suffix}")
+        events.info("[warp] on: connected (ip=%s)", ip or "-")
     else:
         console.print("[red]WARP connect failed[/red] (is warp-cli installed?)")
+        events.warning("[warp] on: connect failed")
         raise typer.Exit(code=1)
 
 
@@ -793,8 +799,10 @@ def warp_off() -> None:
     cfg.save_config(cfg_obj)
     if warp.disconnect():
         console.print("WARP disconnected and disabled")
+        events.info("[warp] off: disconnected")
     else:
         console.print("WARP disabled (already disconnected)")
+        events.info("[warp] off: already disconnected")
 
 
 @warp_app.command("status")
@@ -838,10 +846,14 @@ def self_update_cmd(
 
     console.print(f"[yellow]{result.message}[/yellow]")
     _ensure_confirmed("Download and install the update?", yes)
+    events.info("[self-update] updating %s → %s", result.current, result.latest)
 
     def _progress(stage: str, done: int, total: int) -> None:
         if stage == "done":
             console.print("[green]install complete[/green]")
+            events.info(
+                "[self-update] installed %s → %s", result.current, result.latest
+            )
         elif total:
             pct = int(done * 100 / total)
             console.print(f"  {stage}: {pct}%  ({done}/{total})")

@@ -1,12 +1,12 @@
-import contextlib
 import time
 from urllib.parse import urlparse
 
 import httpx
 
 from openrot.config import Config, Node
+from openrot.core.constants import HEALTH_URL
+from openrot.core.http import get_egress_ip, make_client
 
-HEALTH_URL = "https://www.gstatic.com/generate_204"
 CHECK_TIMEOUT = 4
 
 
@@ -30,8 +30,10 @@ def check_proxy(
     """Health-check a forward proxy, returning (alive, latency_ms)."""
     start = time.monotonic()
     try:
-        with httpx.Client(
-            proxy=f"{protocol}://{host}:{port}", timeout=timeout, follow_redirects=True
+        with make_client(
+            proxy=f"{protocol}://{host}:{port}",
+            timeout=timeout,
+            follow_redirects=True,
         ) as client:
             resp = client.get(HEALTH_URL)
             alive = resp.status_code == 204
@@ -56,7 +58,7 @@ def probe_targets(
     target = url or HEALTH_URL
     start = time.monotonic()
     try:
-        with httpx.Client(
+        with make_client(
             proxy=f"{protocol}://{host}:{port}",
             timeout=timeout,
             follow_redirects=True,
@@ -66,18 +68,9 @@ def probe_targets(
         return [], None
     if 200 <= resp.status_code < 300:
         latency = round((time.monotonic() - start) * 1000, 1)
-        egress_ip = _get_egress_ip(client)
+        egress_ip = get_egress_ip(client)
         return [latency], egress_ip
     return [], None
-
-
-def _get_egress_ip(client: httpx.Client) -> str | None:
-    """Fetch public IP from api.ipify.org through an existing proxy client."""
-    with contextlib.suppress(Exception):
-        resp = client.get("https://api.ipify.org?format=json", timeout=5)
-        if resp.status_code == 200:
-            return resp.json().get("ip")
-    return None
 
 
 def fetch_candidates(text: str) -> list[tuple[str, str, int]]:
@@ -96,7 +89,7 @@ def host_port(raw: str) -> tuple[str | None, int | None]:
     return parsed.hostname, parsed.port
 
 
-def check_node(node: Node, cfg: Config) -> tuple[bool, float | None]:
+def check_proxy_node(node: Node, cfg: Config) -> tuple[bool, float | None]:
     """Health-check a proxy node (protocol http|socks5) using cfg.health_timeout."""
     host, port = host_port(node.raw)
     if host is None or port is None:

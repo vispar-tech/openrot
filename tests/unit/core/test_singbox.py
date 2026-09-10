@@ -2,6 +2,7 @@ from typing import Any, Self
 
 import pytest
 
+import openrot.core.singbox as sb
 from openrot.core.singbox import (
     generate_free_config,
     generate_singbox_config,
@@ -128,8 +129,6 @@ class _FakeClient:
 def test_probe_vless_waits_for_readiness_then_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import openrot.core.singbox as sb
-
     monkeypatch.setattr(sb, "_free_port", lambda: 12345)
     monkeypatch.setattr(sb, "write_config", lambda data, prefix="": _node_probe_conf())
     monkeypatch.setattr(sb, "_wait_for_port", lambda h, p, t: True)
@@ -145,8 +144,6 @@ def test_probe_vless_waits_for_readiness_then_probes(
 def test_probe_vless_logs_stderr_when_singbox_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import openrot.core.singbox as sb
-
     warnings: list[tuple[object, ...]] = []
 
     class _FakeLogger:
@@ -157,15 +154,7 @@ def test_probe_vless_logs_stderr_when_singbox_exits(
     monkeypatch.setattr(sb, "write_config", lambda data, prefix="": _node_probe_conf())
     monkeypatch.setattr(sb, "_wait_for_port", lambda h, p, t: False)
     monkeypatch.setattr(sb.subprocess, "Popen", lambda *a, **k: _ExitedProc())
-    monkeypatch.setattr(
-        sb,
-        "log",
-        type(
-            "_L",
-            (),
-            {"get_logger": staticmethod(lambda: _FakeLogger())},
-        )(),
-    )
+    monkeypatch.setattr(sb, "events", _FakeLogger())
 
     alive, latency, egress_ip = probe_vless(_vless(), "sing-box", timeout=5.0)
     assert alive is False

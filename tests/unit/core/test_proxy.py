@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from openrot.config import Node, NodeProtocol
 from openrot.core import proxy
 
 
@@ -81,8 +82,6 @@ def test_launch_returns_pid(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_start_node_http_uses_free_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Node, NodeProtocol
-
     captured: list[tuple[object, ...]] = []
     node = Node(id="n1", raw="http://proxy.host:8080", protocol=NodeProtocol.HTTP)
     monkeypatch.setattr(
@@ -95,8 +94,6 @@ def test_start_node_http_uses_free_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_start_node_proxy_invalid_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openrot.config import Node, NodeProtocol
-
     node = Node(id="n1", raw="http://", protocol=NodeProtocol.HTTP)
     with pytest.raises(RuntimeError, match="invalid proxy node"):
         proxy.start_node(node, 7000, "sing-box")

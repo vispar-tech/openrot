@@ -14,9 +14,12 @@ from pathlib import Path
 
 from rich.console import Console
 
+from openrot import log
+from openrot.core.pid import PidFile
 from openrot.core.proxy import is_running, load_daemon_pid, save_daemon_pid
 
 console = Console()
+events = log.get_logger()
 
 
 def command(subcommand: str) -> list[str]:
@@ -61,10 +64,12 @@ def start(*, name: str, pid_path: Path) -> None:
     if existing is not None:
         if is_running(existing):
             console.print(f"[yellow]{name} daemon already running[/yellow]")
+            events.info("[daemon] %s already running (pid %d)", name, existing)
             return
-        pid_path.unlink(missing_ok=True)
+        PidFile(pid_path).remove()
     pid = _spawn_daemon(name, pid_path)
     console.print(f"{name} daemon started (pid {pid})")
+    events.info("[daemon] %s started (pid %d)", name, pid)
 
 
 def stop(pid_path: Path) -> bool:
@@ -76,7 +81,7 @@ def stop(pid_path: Path) -> bool:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         return False
-    pid_path.unlink(missing_ok=True)
+    PidFile(pid_path).remove()
     return True
 
 
@@ -94,7 +99,7 @@ def stop_and_wait(pid_path: Path) -> bool:
         return False
     for _ in range(50):
         if not is_running(pid):
-            pid_path.unlink(missing_ok=True)
+            PidFile(pid_path).remove()
             return True
         time.sleep(0.1)
     return False
