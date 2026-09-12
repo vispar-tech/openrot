@@ -160,6 +160,29 @@ The upstream endpoint and port are configurable — see the config fields
 `https://opencode.ai/zen/v1`, the endpoint opencode's built-in provider uses
 natively), or the env overrides `OPENROT_BRIDGE_PORT` and `OPENROT_UPSTREAM`.
 
+### Free-tier session headers
+
+opencode's free tier keys on the `X-Opencode-Session` header: a bare request
+that lacks it lands in the anonymous quota and can be rejected with
+`FreeUsageLimitError`. The bridge injects `X-Opencode-Session` (`ses_`+22
+alnum) and `X-Opencode-Request` (`msg_`+24 alnum) on every upstream request
+that doesn't already carry them, so scripts and `curl` hitting the bridge
+share the free bucket instead of being rate-limited. Values sent by the client
+are respected (never overwritten). Toggle this off with
+`bridge_inject_session: false` in config or
+`OPENROT_BRIDGE_INJECT_SESSION=0`:
+
+```bash
+# via the bridge: headers are added automatically
+curl -s http://127.0.0.1:7891/v1/chat/completions \
+  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+
+# hitting the upstream directly: add the header yourself
+curl -s https://opencode.ai/zen/v1/chat/completions \
+  -H 'X-Opencode-Session: ses_<22 alnum>' \
+  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+```
+
 ## Free sources (profiles)
 
 Everything you add is a **profile**: a URL that returns a list of nodes.

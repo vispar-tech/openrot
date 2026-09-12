@@ -1,13 +1,11 @@
 import logging
 import logging.handlers
 import os
-import sys
 
 from openrot import config as cfg
 
 LOGGER_NAME = "openrot.events"
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
-_CONSOLE_FORMAT = "%(message)s"
 _MAX_BYTES = 1_000_000
 _BACKUP_COUNT = 3
 _DEBUG_ENV = "OPENROT_DEBUG_REQ"
@@ -16,11 +14,9 @@ _DEBUG_ENV = "OPENROT_DEBUG_REQ"
 def get_logger() -> logging.Logger:
     """Return the events logger, configured once to append to a rotating file.
 
-    A console handler (INFO, ``%(message)s``-only) is attached only when stdout
-    is a terminal, so internal events (rotations, starts, bridge requests) are
-    visible during interactive use but stay file-only in daemon/scripted runs.
-    ``OPENROT_DEBUG_REQ=1`` raises the *file* handler to DEBUG (request-level
-    dumps); the console handler never logs DEBUG.
+    Events are file-only: terminal output is done explicitly via ``console.print``
+    on the CLI path. ``OPENROT_DEBUG_REQ=1`` raises the file level to DEBUG
+    (request-level dumps).
     """
     logger = logging.getLogger(LOGGER_NAME)
     if logger.handlers:
@@ -34,11 +30,6 @@ def get_logger() -> logging.Logger:
     file_handler.setLevel(file_level)
     file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
     logger.addHandler(file_handler)
-    if sys.stdout.isatty():
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(logging.Formatter(_CONSOLE_FORMAT))
-        logger.addHandler(console_handler)
     logger.propagate = False
     cfg.LOG_PATH.chmod(0o600)
     return logger

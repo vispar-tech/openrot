@@ -36,6 +36,8 @@ class Config(BaseModel):
     bridge_retry_statuses: list[int] = Field(default_factory=lambda: [429])
     bridge_retry_attempts: int = Field(default=1, ge=0, le=10)
     bridge_max_concurrent: int = Field(default=3, ge=1, le=20)
+    bridge_min_interval: float = Field(default=0.5, ge=0.0)
+    bridge_inject_session: bool = True
     deduplicate_by_ip: bool = True
 
     def all_nodes(self) -> list[Node]:

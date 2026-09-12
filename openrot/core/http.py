@@ -14,13 +14,11 @@ def make_client(
     follow_redirects: bool = False,
 ) -> httpx.Client:
     """Build an ``httpx.Client`` with the common defaults."""
-    kwargs: dict[str, object] = {
-        "timeout": timeout,
-        "follow_redirects": follow_redirects,
-    }
     if proxy:
-        kwargs["proxy"] = proxy
-    return httpx.Client(**kwargs)
+        return httpx.Client(
+            proxy=proxy, timeout=timeout, follow_redirects=follow_redirects
+        )
+    return httpx.Client(timeout=timeout, follow_redirects=follow_redirects)
 
 
 def get_egress_ip(client: httpx.Client) -> str | None:

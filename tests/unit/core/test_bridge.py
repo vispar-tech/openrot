@@ -79,6 +79,48 @@ def test_forward_headers_strips_hop_by_hop_and_sets_host() -> None:
     assert out["Authorization"] == "Bearer k"
 
 
+def _alnum_len(value: str, prefix: str) -> int:
+    assert value.startswith(prefix)
+    return len(value) - len(prefix)
+
+
+def test_forward_headers_injects_session_and_request_when_absent() -> None:
+    out = bridge._forward_headers({}, "up.test")
+    assert _alnum_len(out["X-Opencode-Session"], "ses_") == 22
+    assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
+    assert out["X-Opencode-Session"][4:].isalnum()
+    assert out["X-Opencode-Request"][4:].isalnum()
+
+
+def test_forward_headers_respects_existing_session_and_request() -> None:
+    headers = {
+        "X-Opencode-Session": "ses_customvalue",
+        "X-Opencode-Request": "msg_customvalue",
+    }
+    out = bridge._forward_headers(headers, "up.test")
+    assert out["X-Opencode-Session"] == "ses_customvalue"
+    assert out["X-Opencode-Request"] == "msg_customvalue"
+
+
+def test_forward_headers_respects_existing_session_only() -> None:
+    out = bridge._forward_headers({"X-Opencode-Session": "ses_custom"}, "up.test")
+    assert out["X-Opencode-Session"] == "ses_custom"
+    assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
+
+
+def test_forward_headers_no_injection_when_disabled() -> None:
+    out = bridge._forward_headers({}, "up.test", inject_session=False)
+    assert "X-Opencode-Session" not in out
+    assert "X-Opencode-Request" not in out
+
+
+def test_random_id_format_and_uniqueness() -> None:
+    a = bridge._random_id("ses_", 22)
+    b = bridge._random_id("ses_", 22)
+    assert _alnum_len(a, "ses_") == 22
+    assert a != b
+
+
 class _FakeClient:
     def __init__(self, responses: list[httpx.Response]) -> None:
         self._responses = list(responses)
@@ -426,6 +468,7 @@ def test_serve_starts_cascade_and_listens(
         "load_config",
         lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
     )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
     bridge.serve()
     assert started == [(False, False)]
@@ -451,8 +494,27 @@ def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None
         "load_config",
         lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
     )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
     bridge.serve()
+    assert started == []
+
+
+def test_serve_exits_when_port_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list = []
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: True)
+
+    with pytest.raises(SystemExit) as exc:
+        bridge.serve()
+
+    assert exc.value.code == 1
     assert started == []
 
 
@@ -532,6 +594,7 @@ def test_serve_warns_when_binding_beyond_loopback(
         "load_config",
         lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
     )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     monkeypatch.setattr(bridge.cfg, "listen_address", lambda: "0.0.0.0")
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -569,6 +632,7 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
         "load_config",
         lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
     )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(False))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -603,6 +667,7 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
         "load_config",
         lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
     )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
     monkeypatch.setattr(bridge.sys, "stdout", _FakeStdout(True))
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -727,7 +792,7 @@ def test_handler_returns_502_on_upstream_error(
     handler.send_header = lambda k, v: headers.append((k, v))
     handler.end_headers = lambda: None
 
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_min_interval=0))
 
     def boom(cfg_obj: object, request: object, **kwargs: object) -> object:
         raise httpx.HTTPError("up boom")
@@ -752,7 +817,7 @@ def test_handler_logs_request_elapsed_and_model(
     handler.end_headers = lambda: None
 
     logged: list[str] = []
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_min_interval=0))
     monkeypatch.setattr(bridge, "_respond", lambda handler, resp: None)
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
 
@@ -818,7 +883,7 @@ def test_handler_logs_status_and_request_id(monkeypatch: pytest.MonkeyPatch) -> 
     handler.end_headers = lambda: None
 
     logged: list[str] = []
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_min_interval=0))
     monkeypatch.setattr(bridge, "_respond", lambda handler, resp: 1500)
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
 
@@ -851,7 +916,7 @@ def test_handler_retries_without_rotation_after_upstream_error(
 
     logged: list[str] = []
     warning_called = {"n": 0}
-    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg())
+    monkeypatch.setattr(bridge.cfg, "load_config", lambda: _cfg(bridge_min_interval=0))
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
     monkeypatch.setattr(
         bridge.events, "warning", lambda msg, *a: warning_called.__setitem__("n", 1)
@@ -875,6 +940,58 @@ def test_handler_retries_without_rotation_after_upstream_error(
     assert calls[0] is True
     assert calls[1] is False
     assert not any("rotation" in msg for msg in logged)
+
+
+def test_pace_start_first_call_does_not_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge._last_start_monotonic = 0.0
+    sleeps: list[float] = []
+    monkeypatch.setattr(bridge.time, "sleep", sleeps.append)
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 100.0)
+    bridge._pace_start(_cfg(bridge_min_interval=0.5))
+    assert sleeps == []
+    assert bridge._last_start_monotonic == 100.0
+
+
+def test_pace_start_waits_remaining_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge._last_start_monotonic = 0.0
+    sleeps: list[float] = []
+    monkeypatch.setattr(bridge.time, "sleep", sleeps.append)
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 0.1)
+    bridge._pace_start(_cfg(bridge_min_interval=0.5))
+    assert sleeps == [pytest.approx(0.4)]
+    assert bridge._last_start_monotonic == 0.1
+
+
+def test_pace_start_zero_interval_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge._last_start_monotonic = 100.0
+    sleeps: list[float] = []
+    monkeypatch.setattr(bridge.time, "sleep", sleeps.append)
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 100.0)
+    bridge._pace_start(_cfg(bridge_min_interval=0))
+    assert sleeps == []
+
+
+def test_pace_start_enforces_gap_between_consecutive_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge._last_start_monotonic = 0.0
+    sleeps: list[float] = []
+    now = {"t": 100.0}
+    monkeypatch.setattr(bridge.time, "sleep", sleeps.append)
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: now["t"])
+    bridge._pace_start(_cfg(bridge_min_interval=0.5))
+    assert sleeps == []
+    assert bridge._last_start_monotonic == 100.0
+    now["t"] = 100.2
+    bridge._pace_start(_cfg(bridge_min_interval=0.5))
+    assert sleeps == [pytest.approx(0.3)]
+    assert bridge._last_start_monotonic == 100.2
 
 
 def test_bridge_server_binds_and_closes() -> None:

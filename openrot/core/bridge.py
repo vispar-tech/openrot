@@ -20,7 +20,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets
 import socket
+import string
 import sys
 import threading
 import time
@@ -36,6 +38,7 @@ from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
 from openrot.core.http import make_client
+from openrot.core.singbox import port_in_use
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
@@ -143,12 +146,33 @@ def _client(cfg_obj: Config) -> httpx.Client:
     return make_client(proxy=proxy_url, timeout=300)
 
 
-def _forward_headers(headers: dict[str, str], host: str) -> dict[str, str]:
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _random_id(prefix: str, length: int) -> str:
+    """Return a random alnum identifier (``prefix`` + ``length`` chars).
+
+    opencode's free tier keys on ``X-Opencode-Session`` (``ses_``+22 alnum); the
+    request id ``X-Opencode-Request`` is ``msg_``+24 alnum. The server does not
+    validate uniqueness or signature, so a fresh random id per request is enough.
+    """
+    return prefix + "".join(secrets.choice(_ALNUM) for _ in range(length))
+
+
+def _forward_headers(
+    headers: dict[str, str], host: str, inject_session: bool = True
+) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in headers.items():
         if key.lower() in _REQUEST_STRIP:
             continue
         out[key] = value
+    if inject_session:
+        known = {k.lower(): k for k in out}
+        if "x-opencode-session" not in known:
+            out["X-Opencode-Session"] = _random_id("ses_", 22)
+        if "x-opencode-request" not in known:
+            out["X-Opencode-Request"] = _random_id("msg_", 24)
     if "content-type" not in {k.lower() for k in out}:
         out["Content-Type"] = "application/json"
     out["Host"] = host
@@ -162,7 +186,9 @@ def _fetch(
 ) -> httpx.Response:
     url = upstream_url(cfg_obj, request.path)
     host_header = httpx.URL(url).host  # type: ignore[attr-defined]
-    out_headers = _forward_headers(request.headers, host_header or "")
+    out_headers = _forward_headers(
+        request.headers, host_header or "", inject_session=cfg_obj.bridge_inject_session
+    )
     # Ask for identity so httpx neither injects its own Accept-Encoding nor
     # transparently decompresses: the body is then passed through verbatim.
     out_headers["Accept-Encoding"] = "identity"
@@ -235,6 +261,8 @@ def _reset_client() -> None:
 
 _request_semaphore: threading.Semaphore | None = None
 _semaphore_lock = threading.Lock()
+_last_start_monotonic: float = 0.0
+_pacing_lock = threading.Lock()
 
 
 def _get_semaphore(cfg_obj: Config) -> threading.Semaphore:
@@ -247,6 +275,20 @@ def _get_semaphore(cfg_obj: Config) -> threading.Semaphore:
             return _request_semaphore
         _request_semaphore = threading.Semaphore(cfg_obj.bridge_max_concurrent)
         return _request_semaphore
+
+
+def _pace_start(cfg_obj: Config) -> None:
+    """Sleep until the next allowed upstream start, enforcing a global min gap.
+
+    Pacing is global (across all request starts), not per-slot.
+    """
+    global _last_start_monotonic
+    next_start = _last_start_monotonic + cfg_obj.bridge_min_interval
+    sleep = max(0.0, next_start - time.monotonic())
+    if sleep > 0:
+        time.sleep(sleep)
+    with _pacing_lock:
+        _last_start_monotonic = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +452,13 @@ def serve() -> None:
     through the cascade with 429 self-rotation. Ctrl-C stops it.
     """
     cfg_obj = cfg.load_config()
+    host = cfg.listen_address()
+    if port_in_use(host, cfg_obj.bridge_port):
+        console.print(
+            f"[red]bridge port {host}:{cfg_obj.bridge_port} is already in use; "
+            "not starting[/red]"
+        )
+        raise SystemExit(1)
     if not (
         cfg_obj.active_level != ActiveLevel.NONE and cascade.level_serving(cfg_obj)
     ):
@@ -522,11 +571,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         t0 = time.monotonic()
         semaphore.acquire()
         try:
+            _pace_start(cfg_obj)
             resp, _client = forward(cfg_obj, request)
         except httpx.HTTPError as exc:
             events.warning("[bridge] upstream error, retrying: %s", exc)
             try:
                 cfg_obj = cfg.load_config()
+                _pace_start(cfg_obj)
                 resp, _client = forward(cfg_obj, request, rotate_on_429=False)
             except httpx.HTTPError as retry_exc:
                 self._elapsed_ms = (time.monotonic() - t0) * 1000
