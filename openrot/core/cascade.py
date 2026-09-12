@@ -12,6 +12,7 @@ from openrot.config import ActiveLevel, Config, Node, NodeStatus, Strategy
 from openrot.core import daemon, health, nodes, proxy, refresh, rotator
 from openrot.core.constants import IPIFY_URL
 from openrot.core.http import make_client
+from openrot.core.singbox import port_in_use
 from openrot.providers import warp
 
 console = Console()
@@ -64,6 +65,12 @@ def start(foreground: bool, daemon: bool) -> None:
         )
         return
     cfg_obj = cfg.load_config()
+    if foreground and port_in_use(cfg.listen_address(), cfg_obj.port):
+        console.print(
+            f"[red]port {cfg_obj.port} is already in use "
+            f"({cfg.listen_address()}); not starting[/red]"
+        )
+        raise SystemExit(1)
     if cfg_obj.update_interval > 0 and foreground:
         threading.Thread(
             target=refresh.run_scheduler, name="openrot-scheduler", daemon=True
@@ -121,6 +128,10 @@ def start_warp(foreground: bool) -> bool:
         ip or "-",
     )
     if foreground:
+        console.print(
+            f"proxy: 127.0.0.1:{cfg_obj.port} (pid {pid}), "
+            f"warp: {ip or '-'}. Ctrl-C to stop."
+        )
         warp_health_loop()
     return True
 
@@ -261,8 +272,10 @@ def _rotate_inner(first: bool) -> None:
         if warp.rotate():
             ip = warp.current_ip()
             events.info("[cascade] warp rotated, ip=%s", ip or "-")
+            console.print(f"warp rotated, ip {ip or '-'}")
         else:
             events.warning("[cascade] warp rotation failed")
+            console.print("[red]warp rotation failed[/red]")
         return
 
     current = nodes.current_node(cfg_obj)
@@ -303,6 +316,7 @@ def _rotate_inner(first: bool) -> None:
         events.warning("[cascade] %s", exc)
         raise SystemExit(1) from exc
     events.info("[cascade] rotated to node %s (pid %d)", nodes.node_label(node), pid)
+    console.print(f"rotated to node {nodes.node_label(node)} (pid {pid})")
 
 
 def stop() -> None:

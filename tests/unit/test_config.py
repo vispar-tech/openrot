@@ -142,12 +142,54 @@ def test_env_bad_retry_attempts_raises_config_error(
         cfg.load_config(path)
 
 
+def test_env_overrides_bridge_min_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_MIN_INTERVAL", "1.5")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    loaded = cfg.load_config(path)
+    assert loaded.bridge_min_interval == 1.5
+
+
+def test_env_bad_bridge_min_interval_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_MIN_INTERVAL", "not-a-number")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(path)
+
+
+def test_env_bridge_inject_session_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_INJECT_SESSION", "false")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    assert cfg.load_config(path).bridge_inject_session is False
+
+
+def test_env_bad_bridge_inject_session_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_INJECT_SESSION", "not-a-bool")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(path)
+
+
 def test_config_bridge_and_pool_defaults() -> None:
     c = Config()
     assert c.bridge_port == 7891
     assert c.bridge_upstream == "https://opencode.ai/zen"
     assert c.bridge_retry_statuses == [429]
     assert c.bridge_retry_attempts == 1
+    assert c.bridge_max_concurrent == 3
+    assert c.bridge_min_interval == 0.5
+    assert c.bridge_inject_session is True
     assert c.max_workers == 50
 
 

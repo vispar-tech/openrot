@@ -36,6 +36,7 @@ def test_start_foreground_interrupt_shuts_down(
     monkeypatch.setattr(cascade.signals, "keyboard_on_sigterm", lambda: None)
     monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: calls.append("proxy"))
     monkeypatch.setattr(cascade.warp, "disconnect", lambda: calls.append("warp"))
+    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
     cfg_obj = Config(update_interval=0, active_level=ActiveLevel.NODE)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: cfg_obj)
     monkeypatch.setattr(cascade.cfg, "save_config", lambda c: None)
@@ -80,6 +81,7 @@ def test_start_foreground_interrupt_races_scheduler(
     monkeypatch.setattr(cascade.signals, "keyboard_on_sigterm", lambda: None)
     monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
     monkeypatch.setattr(cascade.warp, "disconnect", lambda: None)
+    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
     monkeypatch.setattr(
         cascade.cfg, "save_config", lambda c, path=None: shutdown_calls.append(c)
@@ -108,6 +110,20 @@ def test_start_with_daemon_flag_forks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cascade, "daemonize", fake_daemonize)
     cascade.start(False, True)
     assert called["n"] == 1
+
+
+def test_start_foreground_exits_when_port_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cascade.proxy, "load_pid", lambda: None)
+    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
+    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: True)
+    monkeypatch.setattr(cascade, "start_warp", lambda f: True)
+
+    with pytest.raises(SystemExit) as exc:
+        cascade.start(True, False)
+
+    assert exc.value.code == 1
 
 
 def test_start_exits_when_proxy_already_running(
@@ -331,6 +347,7 @@ def test_start_foreground_no_warp_node(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cascade, "start_warp", fake_start_warp)
     monkeypatch.setattr(cascade, "start_node", fake_start_node)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
+    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(cascade.threading, "Thread", lambda **kw: None)
 
     cascade.start(True, False)

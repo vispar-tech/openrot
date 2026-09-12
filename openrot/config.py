@@ -121,6 +121,17 @@ def _env_int(name: str, attr: str, cfg: Config) -> None:
         raise ConfigError(f"bad {name} {raw!r}: {exc}") from exc
 
 
+def _env_float(name: str, attr: str, cfg: Config) -> None:
+    """Apply a float-valued env override, raising ``ConfigError`` on bad input."""
+    raw = os.environ.get(name)
+    if not raw:
+        return
+    try:
+        setattr(cfg, attr, float(raw))
+    except (ValueError, ValidationError) as exc:
+        raise ConfigError(f"bad {name} {raw!r}: {exc}") from exc
+
+
 def _env_int_list(name: str, attr: str, cfg: Config) -> None:
     """Apply a comma-separated int-list env override, raising on bad input."""
     raw = os.environ.get(name)
@@ -130,6 +141,24 @@ def _env_int_list(name: str, attr: str, cfg: Config) -> None:
     try:
         setattr(cfg, attr, [int(p) for p in parts])
     except ValueError as exc:
+        raise ConfigError(f"bad {name} {raw!r}: {exc}") from exc
+
+
+def _env_bool(name: str, attr: str, cfg: Config) -> None:
+    """Apply a boolean env override, raising ``ConfigError`` on bad input."""
+    raw = os.environ.get(name)
+    if not raw:
+        return
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        value = True
+    elif normalized in {"0", "false", "no", "off"}:
+        value = False
+    else:
+        raise ConfigError(f"bad {name} {raw!r}: expected a boolean")
+    try:
+        setattr(cfg, attr, value)
+    except ValidationError as exc:
         raise ConfigError(f"bad {name} {raw!r}: {exc}") from exc
 
 
@@ -145,6 +174,8 @@ def _apply_env_overrides(cfg: Config) -> Config:
     _env_int_list("OPENROT_BRIDGE_RETRY_STATUSES", "bridge_retry_statuses", cfg)
     _env_int("OPENROT_BRIDGE_RETRY_ATTEMPTS", "bridge_retry_attempts", cfg)
     _env_int("OPENROT_BRIDGE_MAX_CONCURRENT", "bridge_max_concurrent", cfg)
+    _env_float("OPENROT_BRIDGE_MIN_INTERVAL", "bridge_min_interval", cfg)
+    _env_bool("OPENROT_BRIDGE_INJECT_SESSION", "bridge_inject_session", cfg)
     _env_int("OPENROT_MAX_WORKERS", "max_workers", cfg)
     return cfg
 

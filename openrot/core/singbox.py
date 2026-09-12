@@ -182,6 +182,13 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def port_in_use(host: str, port: int) -> bool:
+    """Return True when something is already listening on `host:port`."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0
+
+
 def _wait_for_port(host: str, port: int, timeout: float, step: float = 0.05) -> bool:
     """Poll until `host:port` accepts connections or `timeout` elapses."""
     deadline = time.monotonic() + timeout
