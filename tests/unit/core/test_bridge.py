@@ -5,6 +5,7 @@ merged into ``openrot.core.bridge``, and their tests live here too.
 """
 
 import gzip
+import json
 import socket
 from io import BytesIO
 from pathlib import Path
@@ -86,10 +87,27 @@ def _alnum_len(value: str, prefix: str) -> int:
 
 def test_forward_headers_injects_session_and_request_when_absent() -> None:
     out = bridge._forward_headers({}, "up.test")
-    assert _alnum_len(out["X-Opencode-Session"], "ses_") == 22
+    assert _alnum_len(out["X-Opencode-Session"], "ses_") == 26
+    assert out["X-Opencode-Session"][len("ses_"):].isdigit()
     assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
-    assert out["X-Opencode-Session"][4:].isalnum()
-    assert out["X-Opencode-Request"][4:].isalnum()
+    assert out["X-Opencode-Request"][len("msg_"):].isalnum()
+
+
+def test_forward_headers_injects_opencode_user_agent_when_absent() -> None:
+    out = bridge._forward_headers({}, "up.test")
+    assert out["User-Agent"].startswith("opencode/")
+
+
+def test_forward_headers_overrides_non_opencode_user_agent() -> None:
+    out = bridge._forward_headers({"User-Agent": "curl/8.0"}, "up.test")
+    assert out["User-Agent"].startswith("opencode/")
+    assert sum(k.lower() == "user-agent" for k in out) == 1
+
+
+def test_forward_headers_keeps_opencode_user_agent() -> None:
+    ua = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    out = bridge._forward_headers({"User-Agent": ua}, "up.test")
+    assert out["User-Agent"] == ua
 
 
 def test_forward_headers_respects_existing_session_and_request() -> None:
@@ -109,16 +127,48 @@ def test_forward_headers_respects_existing_session_only() -> None:
 
 
 def test_forward_headers_no_injection_when_disabled() -> None:
-    out = bridge._forward_headers({}, "up.test", inject_session=False)
+    out = bridge._forward_headers({}, "up.test", inject=False)
     assert "X-Opencode-Session" not in out
     assert "X-Opencode-Request" not in out
+    assert "User-Agent" not in out
 
 
 def test_random_id_format_and_uniqueness() -> None:
-    a = bridge._random_id("ses_", 22)
-    b = bridge._random_id("ses_", 22)
-    assert _alnum_len(a, "ses_") == 22
+    a = bridge._random_id("msg_", 24)
+    b = bridge._random_id("msg_", 24)
+    assert _alnum_len(a, "msg_") == 24
     assert a != b
+
+
+def test_random_session_id_format() -> None:
+    a = bridge._random_session_id()
+    b = bridge._random_session_id()
+    assert _alnum_len(a, "ses_") == 26
+    assert a[len("ses_"):].isdigit()
+    assert a != b
+
+
+def test_ensure_tools_injects_stubs_when_missing() -> None:
+    body = b'{"model": "big-pickle", "messages": []}'
+    out = json.loads(bridge._ensure_tools(body))
+    assert len(out["tools"]) == 2
+    assert out["tools"][0]["type"] == "function"
+
+
+def test_ensure_tools_injects_stubs_when_single_tool() -> None:
+    body = b'{"model": "big-pickle", "tools": [{"type": "function"}]}'
+    out = json.loads(bridge._ensure_tools(body))
+    assert len(out["tools"]) == 2
+
+
+def test_ensure_tools_keeps_two_or_more_tools() -> None:
+    body = b'{"model": "big-pickle", "tools": [{"type": "function"}, {"type": "function"}]}'
+    assert bridge._ensure_tools(body) == body
+
+
+def test_ensure_tools_leaves_invalid_and_empty_bodies() -> None:
+    assert bridge._ensure_tools(b"") == b""
+    assert bridge._ensure_tools(b"not json") == b"not json"
 
 
 class _FakeClient:
@@ -461,6 +511,7 @@ def test_serve_starts_cascade_and_listens(
             pass
 
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: False)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     started: list[tuple[bool, bool]] = []
     monkeypatch.setattr(bridge.cascade, "start", lambda f, d: started.append((f, d)))
     monkeypatch.setattr(
@@ -487,6 +538,7 @@ def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None
             pass
 
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     started: list = []
     monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
     monkeypatch.setattr(
@@ -500,9 +552,43 @@ def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None
     assert started == []
 
 
+def test_serve_starts_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """serve() always starts the cascade background loops (health + scheduler)."""
+
+    class FakeServer:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "start", lambda *a: None)
+    background_calls: list[int] = []
+    monkeypatch.setattr(
+        bridge.cascade, "background", lambda: background_calls.append(1)
+    )
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+    )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
+    monkeypatch.setattr(bridge, "Bridge", FakeServer)
+
+    bridge.serve()
+
+    assert background_calls == [1]
+
+
 def test_serve_exits_when_port_busy(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list = []
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
     monkeypatch.setattr(
         bridge.cfg,
@@ -589,6 +675,7 @@ def test_serve_warns_when_binding_beyond_loopback(
 
     logged: list[str] = []
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
@@ -627,6 +714,7 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
     printed: list[str] = []
     console_printed: list[str] = []
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
@@ -662,6 +750,7 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
     printed: list[str] = []
     console_printed: list[str] = []
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
