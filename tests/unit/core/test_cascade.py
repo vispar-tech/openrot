@@ -536,11 +536,13 @@ def test_warp_health_loop_falls_back_to_node(
     monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
     monkeypatch.setattr(cascade.warp, "is_connected", fake_is_connected)
     monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade, "start_node", lambda fg: None)
+    started_with: list[bool] = []
+    monkeypatch.setattr(cascade, "start_node", started_with.append)
 
     cascade.warp_health_loop()
 
     assert call_count["n"] == 1
+    assert started_with == [True]
 
 
 def test_warp_health_loop_continues_while_connected(
@@ -569,6 +571,86 @@ def test_warp_health_loop_continues_while_connected(
         cascade.warp_health_loop()
 
     assert call_count["n"] == 2
+
+
+def test_warp_health_loop_falls_back_without_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In bridge-daemon mode the fallback starts the node chain non-foreground."""
+    call_count = {"n": 0}
+
+    def fake_sleep(s: float) -> None:
+        call_count["n"] += 1
+
+    def fake_load() -> Config:
+        return Config(update_interval=0, health_interval=1)
+
+    _patch_events(monkeypatch)
+    monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
+    monkeypatch.setattr(cascade.warp, "is_connected", lambda: False)
+    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
+    started_with: list[bool] = []
+    monkeypatch.setattr(cascade, "start_node", started_with.append)
+
+    cascade.warp_health_loop(foreground=False)
+
+    assert started_with == [False]
+
+
+def test_background_starts_loops_and_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """background() starts scheduler and both health loops as daemon threads."""
+    started: list[dict[str, object]] = []
+
+    class FakeThread:
+        def __init__(self, **kwargs: object) -> None:
+            started.append(kwargs)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(cascade.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        cascade.cfg,
+        "load_config",
+        lambda: Config(update_interval=60, health_interval=1),
+    )
+
+    cascade.background()
+
+    names = {t["name"] for t in started}
+    assert names == {"openrot-scheduler", "openrot-node-health", "openrot-warp-health"}
+    assert all(t["daemon"] is True for t in started)
+    warp = next(t for t in started if t["name"] == "openrot-warp-health")
+    assert warp["kwargs"] == {"foreground": False}
+
+
+def test_background_skips_scheduler_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With update_interval=0 only the health loops are started."""
+    started: list[dict[str, object]] = []
+
+    class FakeThread:
+        def __init__(self, **kwargs: object) -> None:
+            started.append(kwargs)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(cascade.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        cascade.cfg, "load_config", lambda: Config(update_interval=0, health_interval=1)
+    )
+
+    cascade.background()
+
+    assert {t["name"] for t in started} == {
+        "openrot-node-health",
+        "openrot-warp-health",
+    }
 
 
 def test_rotate_waits_when_already_in_progress(

@@ -108,7 +108,9 @@ def _debug_request(
 _HOP_BY_HOP = {"connection", "host", "proxy-connection"}
 
 # Request leg: transport framing is re-created from the raw body by httpx.
-_REQUEST_STRIP = _HOP_BY_HOP | {"transfer-encoding", "content-length"}
+# ``x-opencode-client`` is an opencode client marker the gateway does not
+# inspect, so it is dropped rather than forwarded.
+_REQUEST_STRIP = _HOP_BY_HOP | {"transfer-encoding", "content-length", "x-opencode-client"}
 
 # Response leg: framing is re-created below (content-length or chunked).
 _RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
@@ -148,31 +150,100 @@ def _client(cfg_obj: Config) -> httpx.Client:
 
 _ALNUM = string.ascii_letters + string.digits
 
+# User-Agent the free tier gateway expects; injected when the client sends
+# none or a non-opencode one (curl, python-requests, ...).
+_OPENCODE_UA = "opencode/1.18.30 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+# Stub tools injected into bodies that carry no (or too few) tools: the free
+# tier gateway requires a ``tools`` array with at least two elements and
+# validates the tool names against real opencode tools (bash, read, ...).
+_STUB_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"c": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "read",
+            "parameters": {
+                "type": "object",
+                "properties": {"p": {"type": "string"}},
+            },
+        },
+    },
+]
+
 
 def _random_id(prefix: str, length: int) -> str:
     """Return a random alnum identifier (``prefix`` + ``length`` chars).
 
-    opencode's free tier keys on ``X-Opencode-Session`` (``ses_``+22 alnum); the
-    request id ``X-Opencode-Request`` is ``msg_``+24 alnum. The server does not
-    validate uniqueness or signature, so a fresh random id per request is enough.
+    The request id ``X-Opencode-Request`` is ``msg_``+24 alnum. The server does
+    not validate uniqueness or signature, so a fresh random id per request is
+    enough.
     """
     return prefix + "".join(secrets.choice(_ALNUM) for _ in range(length))
 
 
+def _random_session_id() -> str:
+    """Return a session id the free tier gateway accepts.
+
+    The gateway validates ``X-Opencode-Session`` by format only: ``ses_``
+    followed by exactly 26 digits (``^ses_\\d{26}$``). Anything else — 22 alnum,
+    shorter/longer digit runs, mixed alnum — is rejected with FreeTierError.
+    """
+    return "ses_" + "".join(secrets.choice("0123456789") for _ in range(26))
+
+
+def _ensure_tools(body: bytes) -> bytes:
+    """Inject stub tools into the body when the client sent none.
+
+    The free tier gateway requires a ``tools`` array with at least two
+    elements. Bodies that already carry two or more tools (real opencode
+    clients send 30+) pass through untouched; only tool-less or single-tool
+    bodies are rewritten.
+    """
+    if not body:
+        return body
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, AttributeError):
+        return body
+    tools = data.get("tools")
+    if isinstance(tools, list) and len(tools) >= 2:
+        return body
+    data["tools"] = _STUB_TOOLS
+    return json.dumps(data).encode()
+
+
 def _forward_headers(
-    headers: dict[str, str], host: str, inject_session: bool = True
+    headers: dict[str, str], host: str, inject: bool = True
 ) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in headers.items():
         if key.lower() in _REQUEST_STRIP:
             continue
         out[key] = value
-    if inject_session:
+    if inject:
         known = {k.lower(): k for k in out}
         if "x-opencode-session" not in known:
-            out["X-Opencode-Session"] = _random_id("ses_", 22)
+            out["X-Opencode-Session"] = _random_session_id()
         if "x-opencode-request" not in known:
             out["X-Opencode-Request"] = _random_id("msg_", 24)
+        ua_key = known.get("user-agent")
+        if ua_key is not None and not out[ua_key].lower().startswith("opencode/"):
+            del out[ua_key]
+            ua_key = None
+        if ua_key is None:
+            out["User-Agent"] = _OPENCODE_UA
     if "content-type" not in {k.lower() for k in out}:
         out["Content-Type"] = "application/json"
     out["Host"] = host
@@ -187,11 +258,13 @@ def _fetch(
     url = upstream_url(cfg_obj, request.path)
     host_header = httpx.URL(url).host  # type: ignore[attr-defined]
     out_headers = _forward_headers(
-        request.headers, host_header or "", inject_session=cfg_obj.bridge_inject_session
+        request.headers, host_header or "", inject=cfg_obj.bridge_inject_session
     )
     # Ask for identity so httpx neither injects its own Accept-Encoding nor
     # transparently decompresses: the body is then passed through verbatim.
     out_headers["Accept-Encoding"] = "identity"
+    if os.environ.get("OPENROT_DEBUG_REQ"):
+        _debug_request("OUT", url, out_headers, request.body)
     try:
         req = httpx.Request(
             request.method, url, headers=out_headers, content=request.body
@@ -465,6 +538,7 @@ def serve() -> None:
         console.print("no active level, starting cascade...")
         cascade.start(False, False)
         cfg_obj = cfg.load_config()
+    cascade.background()
 
     url = base_url(cfg_obj)
     console.print(
@@ -564,6 +638,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         ).rsplit("/", 1)[-1]
 
         cfg_obj = cfg.load_config()
+        if cfg_obj.bridge_inject_session:
+            body = _ensure_tools(body)
         request = _Request(method, self.path, dict(self.headers.items()), body)
         if os.environ.get("OPENROT_DEBUG_REQ"):
             _debug_request(method, self.path, request.headers, request.body)

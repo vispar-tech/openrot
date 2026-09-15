@@ -226,8 +226,12 @@ def node_health_loop() -> None:
                 rotate()
 
 
-def warp_health_loop() -> None:
-    """Fall back to the node chain when WARP connectivity is lost."""
+def warp_health_loop(foreground: bool = True) -> None:
+    """Fall back to the node chain when WARP connectivity is lost.
+
+    ``foreground=False`` (bridge daemon) skips the console line and does not
+    start its own node health loop — the caller runs one already.
+    """
     while True:
         cfg_obj = cfg.load_config()
         time.sleep(cfg_obj.health_interval)
@@ -235,8 +239,31 @@ def warp_health_loop() -> None:
             continue
         events.warning("[cascade] warp dropped; falling back to node chain")
         proxy.stop_proxy()
-        start_node(True)
+        start_node(foreground)
         return
+
+
+def background() -> None:
+    """Run the health loops and refresh scheduler in daemon threads.
+
+    Used by the bridge daemon (``serve()``), where the cascade is started
+    without a foreground loop: without this, a dead node or dropped WARP
+    would leave the bridge serving 502s forever.
+    """
+    cfg_obj = cfg.load_config()
+    if cfg_obj.update_interval > 0:
+        threading.Thread(
+            target=refresh.run_scheduler, name="openrot-scheduler", daemon=True
+        ).start()
+    threading.Thread(
+        target=node_health_loop, name="openrot-node-health", daemon=True
+    ).start()
+    threading.Thread(
+        target=warp_health_loop,
+        name="openrot-warp-health",
+        kwargs={"foreground": False},
+        daemon=True,
+    ).start()
 
 
 def rotate(first: bool = False) -> bool:
