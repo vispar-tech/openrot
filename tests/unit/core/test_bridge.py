@@ -88,9 +88,9 @@ def _alnum_len(value: str, prefix: str) -> int:
 def test_forward_headers_injects_session_and_request_when_absent() -> None:
     out = bridge._forward_headers({}, "up.test")
     assert _alnum_len(out["X-Opencode-Session"], "ses_") == 26
-    assert out["X-Opencode-Session"][len("ses_"):].isdigit()
+    assert out["X-Opencode-Session"][len("ses_") :].isdigit()
     assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
-    assert out["X-Opencode-Request"][len("msg_"):].isalnum()
+    assert out["X-Opencode-Request"][len("msg_") :].isalnum()
 
 
 def test_forward_headers_injects_opencode_user_agent_when_absent() -> None:
@@ -144,7 +144,7 @@ def test_random_session_id_format() -> None:
     a = bridge._random_session_id()
     b = bridge._random_session_id()
     assert _alnum_len(a, "ses_") == 26
-    assert a[len("ses_"):].isdigit()
+    assert a[len("ses_") :].isdigit()
     assert a != b
 
 
@@ -162,7 +162,10 @@ def test_ensure_tools_injects_stubs_when_single_tool() -> None:
 
 
 def test_ensure_tools_keeps_two_or_more_tools() -> None:
-    body = b'{"model": "big-pickle", "tools": [{"type": "function"}, {"type": "function"}]}'
+    body = (
+        b'{"model": "big-pickle", '
+        b'"tools": [{"type": "function"}, {"type": "function"}]}'
+    )
     assert bridge._ensure_tools(body) == body
 
 

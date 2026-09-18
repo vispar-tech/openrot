@@ -130,9 +130,12 @@ def test_disconnect_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_rotate_reconnects(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    ips = iter(["1.1.1.1", "2.2.2.2"])
     monkeypatch.setattr(w, "is_installed", lambda: True)
     monkeypatch.setattr(w, "disconnect", lambda: calls.append("dis") or True)
     monkeypatch.setattr(w, "connect", lambda: calls.append("con") or True)
+    monkeypatch.setattr(w, "current_ip", lambda: next(ips))
+    monkeypatch.setattr(w, "time", _NoSleep)
     assert w.rotate() is True
     assert calls == ["dis", "con"]
 
@@ -140,6 +143,37 @@ def test_rotate_reconnects(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_rotate_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(w, "is_installed", lambda: False)
     assert w.rotate() is False
+
+
+def test_rotate_retries_until_ip_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same IP on early attempts, a change on the last one succeeds."""
+    calls: list[str] = []
+    ips = iter(["1.1.1.1", "1.1.1.1", "1.1.1.1", "2.2.2.2"])
+    monkeypatch.setattr(w, "is_installed", lambda: True)
+    monkeypatch.setattr(w, "disconnect", lambda: calls.append("dis") or True)
+    monkeypatch.setattr(w, "connect", lambda: calls.append("con") or True)
+    monkeypatch.setattr(w, "current_ip", lambda: next(ips))
+    monkeypatch.setattr(w, "time", _NoSleep)
+    assert w.rotate() is True
+    assert calls == ["dis", "con", "dis", "con", "dis", "con"]
+
+
+def test_rotate_exhausted_falls_back_to_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IP never changes; after max attempts return the connection state."""
+    calls: list[str] = []
+    ips = ["1.1.1.1"] + ["1.1.1.1"] * w.ROTATE_MAX_ATTEMPTS
+    monkeypatch.setattr(w, "is_installed", lambda: True)
+    monkeypatch.setattr(w, "disconnect", lambda: calls.append("dis") or True)
+    monkeypatch.setattr(w, "connect", lambda: calls.append("con") or True)
+    monkeypatch.setattr(w, "current_ip", lambda: ips.pop(0))
+    monkeypatch.setattr(w, "time", _NoSleep)
+    monkeypatch.setattr(w, "is_connected", lambda: False)
+    assert w.rotate() is False
+    assert len(calls) == w.ROTATE_MAX_ATTEMPTS * 2
 
 
 def test_install_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
