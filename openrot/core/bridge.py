@@ -110,7 +110,11 @@ _HOP_BY_HOP = {"connection", "host", "proxy-connection"}
 # Request leg: transport framing is re-created from the raw body by httpx.
 # ``x-opencode-client`` is an opencode client marker the gateway does not
 # inspect, so it is dropped rather than forwarded.
-_REQUEST_STRIP = _HOP_BY_HOP | {"transfer-encoding", "content-length", "x-opencode-client"}
+_REQUEST_STRIP = _HOP_BY_HOP | {
+    "transfer-encoding",
+    "content-length",
+    "x-opencode-client",
+}
 
 # Response leg: framing is re-created below (content-length or chunked).
 _RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
@@ -194,7 +198,7 @@ def _random_id(prefix: str, length: int) -> str:
 
 
 def _random_session_id() -> str:
-    """Return a session id the free tier gateway accepts.
+    r"""Return a session id the free tier gateway accepts.
 
     The gateway validates ``X-Opencode-Session`` by format only: ``ses_``
     followed by exactly 26 digits (``^ses_\\d{26}$``). Anything else — 22 alnum,
@@ -215,7 +219,7 @@ def _ensure_tools(body: bytes) -> bytes:
         return body
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return body
     tools = data.get("tools")
     if isinstance(tools, list) and len(tools) >= 2:
@@ -611,10 +615,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parts.append(f"req={req_id}")
         _log(f"[bridge] {' '.join(parts)}")
 
-    def _handle(self, method: str) -> None:
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        body = self.rfile.read(length) if length else b""
-
+    def _inspect_body(self, body: bytes) -> None:
+        """Record the model and prompt char count from a JSON body."""
         model = ""
         prompt_chars = 0
         if body:
@@ -629,13 +631,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     )
             except json.JSONDecodeError, AttributeError:
                 pass
-
         self._model = model
         self._prompt_chars = prompt_chars
         self._req_id = next(
             (v for k, v in self.headers.items() if k.lower() == "x-opencode-request"),
             "",
         ).rsplit("/", 1)[-1]
+
+    def _fail_upstream(self, method: str, t0: float, exc: BaseException) -> None:
+        """Record a failed upstream exchange and send a 502 to the client."""
+        self._elapsed_ms = (time.monotonic() - t0) * 1000
+        self._output_chars = 0
+        self._status = 502
+        self._log_request_console(method)
+        _send_502(self, str(exc))
+
+    def _handle(self, method: str) -> None:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+
+        self._inspect_body(body)
 
         cfg_obj = cfg.load_config()
         if cfg_obj.bridge_inject_session:
@@ -656,11 +671,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 _pace_start(cfg_obj)
                 resp, _client = forward(cfg_obj, request, rotate_on_429=False)
             except httpx.HTTPError as retry_exc:
-                self._elapsed_ms = (time.monotonic() - t0) * 1000
-                self._output_chars = 0
-                self._status = 502
-                self._log_request_console(method)
-                _send_502(self, str(retry_exc))
+                self._fail_upstream(method, t0, retry_exc)
                 return
         finally:
             semaphore.release()
