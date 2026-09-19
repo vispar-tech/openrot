@@ -50,10 +50,6 @@ __all__ = [
 ]
 
 
-class ConfigError(ValueError):
-    """Raised when the config file cannot be read or validated."""
-
-
 def _base_dir() -> Path:
     env = os.environ.get("OPENROT_DIR")
     if env:
@@ -244,3 +240,7 @@ def update_config(path: Path, mutator: Callable[[Config], Any]) -> Any:
         result = mutator(cfg)
         _save_unlocked(cfg, path)
         return result
+
+
+class ConfigError(ValueError):
+    """Raised when the config file cannot be read or validated."""

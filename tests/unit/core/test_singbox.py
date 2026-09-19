@@ -21,6 +21,14 @@ def _vless(**overrides: Any) -> VlessNode:
     return VlessNode(**defaults)
 
 
+def _node_probe_conf() -> object:
+    class _Conf:
+        def unlink(self, missing_ok: bool = False) -> None:
+            return None
+
+    return _Conf()
+
+
 def test_relay_config_tls() -> None:
     data = generate_singbox_config(_vless(tls=True, servername="example.com"), 7890)
     inbound = data["inbounds"][0]
@@ -88,44 +96,6 @@ def test_free_config_socks5() -> None:
     assert data["outbounds"][0]["type"] == "socks"
 
 
-class _RunningProc:
-    def poll(self) -> None:
-        return None
-
-    returncode = 0
-
-    def terminate(self) -> None:
-        pass
-
-
-class _ExitedProc:
-    def poll(self) -> int:
-        return 3
-
-    returncode = 3
-
-    def terminate(self) -> None:
-        pass
-
-
-class _FakeResponse:
-    status_code = 204
-
-
-class _FakeClient:
-    def __init__(self, **kwargs: Any) -> None:
-        pass
-
-    def get(self, url: str) -> _FakeResponse:
-        return _FakeResponse()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *a: object) -> None:
-        return None
-
-
 def test_probe_vless_waits_for_readiness_then_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,9 +136,39 @@ def test_probe_vless_logs_stderr_when_singbox_exits(
     assert rc == 3
 
 
-def _node_probe_conf() -> object:
-    class _Conf:
-        def unlink(self, missing_ok: bool = False) -> None:
-            return None
+class _RunningProc:
+    def poll(self) -> None:
+        return None
 
-    return _Conf()
+    returncode = 0
+
+    def terminate(self) -> None:
+        pass
+
+
+class _ExitedProc:
+    def poll(self) -> int:
+        return 3
+
+    returncode = 3
+
+    def terminate(self) -> None:
+        pass
+
+
+class _FakeResponse:
+    status_code = 204
+
+
+class _FakeClient:
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    def get(self, url: str) -> _FakeResponse:
+        return _FakeResponse()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        return None

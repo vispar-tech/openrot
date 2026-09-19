@@ -42,8 +42,78 @@ from openrot.core.singbox import port_in_use
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 
+
+@dataclass(frozen=True)
+class _Request:
+    """A single HTTP request the bridge forwards upstream."""
+
+    method: str
+    path: str
+    headers: dict[str, str]
+    body: bytes
+
+
+# True hop-by-hop headers, stripped on both legs.
+_HOP_BY_HOP = {"connection", "host", "proxy-connection"}
+
+# Request leg: transport framing is re-created from the raw body by httpx.
+# ``x-opencode-client`` is an opencode client marker the gateway does not
+# inspect, so it is dropped rather than forwarded.
+_REQUEST_STRIP = _HOP_BY_HOP | {
+    "transfer-encoding",
+    "content-length",
+}
+
+# Response leg: framing is re-created below (content-length or chunked).
+_RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
+
+_ALNUM = string.ascii_letters + string.digits
+
+# User-Agent the free tier gateway expects; injected when the client sends
+# none or a non-opencode one (curl, python-requests, ...).
+_OPENCODE_UA = "opencode/1.18.30 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+# Stub tools injected into bodies that carry no (or too few) tools: the free
+# tier gateway requires a ``tools`` array with at least two elements and
+# validates the tool names against real opencode tools (bash, read, ...).
+_STUB_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"c": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "read",
+            "parameters": {
+                "type": "object",
+                "properties": {"p": {"type": "string"}},
+            },
+        },
+    },
+]
+
+_RETRY_DELAY_DEFAULT = 5.0
+
+
 events = _get_logger()
 console = Console()
+
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+_request_semaphore: threading.Semaphore | None = None
+_semaphore_lock = threading.Lock()
+_last_start_monotonic: float = 0.0
+_pacing_lock = threading.Lock()
 
 
 def _log(msg: str) -> None:
@@ -104,22 +174,6 @@ def _debug_request(
     )
 
 
-# True hop-by-hop headers, stripped on both legs.
-_HOP_BY_HOP = {"connection", "host", "proxy-connection"}
-
-# Request leg: transport framing is re-created from the raw body by httpx.
-# ``x-opencode-client`` is an opencode client marker the gateway does not
-# inspect, so it is dropped rather than forwarded.
-_REQUEST_STRIP = _HOP_BY_HOP | {
-    "transfer-encoding",
-    "content-length",
-    "x-opencode-client",
-}
-
-# Response leg: framing is re-created below (content-length or chunked).
-_RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
-
-
 def _send_502(handler: BaseHTTPRequestHandler, message: str) -> None:
     """Write a JSON 502 response to the connected client."""
     msg = {"error": {"message": message, "type": "upstream"}}
@@ -137,54 +191,9 @@ def upstream_url(cfg_obj: Config, path: str) -> str:
     return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
 
 
-@dataclass(frozen=True)
-class _Request:
-    """A single HTTP request the bridge forwards upstream."""
-
-    method: str
-    path: str
-    headers: dict[str, str]
-    body: bytes
-
-
 def _client(cfg_obj: Config) -> httpx.Client:
     proxy_url = f"http://127.0.0.1:{cfg_obj.port}"
     return make_client(proxy=proxy_url, timeout=300)
-
-
-_ALNUM = string.ascii_letters + string.digits
-
-# User-Agent the free tier gateway expects; injected when the client sends
-# none or a non-opencode one (curl, python-requests, ...).
-_OPENCODE_UA = "opencode/1.18.30 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
-
-# Stub tools injected into bodies that carry no (or too few) tools: the free
-# tier gateway requires a ``tools`` array with at least two elements and
-# validates the tool names against real opencode tools (bash, read, ...).
-_STUB_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "run",
-            "parameters": {
-                "type": "object",
-                "properties": {"c": {"type": "string"}},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read",
-            "description": "read",
-            "parameters": {
-                "type": "object",
-                "properties": {"p": {"type": "string"}},
-            },
-        },
-    },
-]
 
 
 def _random_id(prefix: str, length: int) -> str:
@@ -208,12 +217,11 @@ def _random_session_id() -> str:
 
 
 def _ensure_tools(body: bytes) -> bytes:
-    """Inject stub tools into the body when the client sent none.
+    """Append the stub tools to the request's tools array.
 
     The free tier gateway requires a ``tools`` array with at least two
-    elements. Bodies that already carry two or more tools (real opencode
-    clients send 30+) pass through untouched; only tool-less or single-tool
-    bodies are rewritten.
+    elements, so the two stub tools are appended to every JSON body —
+    unless a tool with the same name is already present.
     """
     if not body:
         return body
@@ -222,9 +230,16 @@ def _ensure_tools(body: bytes) -> bytes:
     except json.JSONDecodeError, AttributeError:
         return body
     tools = data.get("tools")
-    if isinstance(tools, list) and len(tools) >= 2:
-        return body
-    data["tools"] = _STUB_TOOLS
+    if not isinstance(tools, list):
+        tools = []
+    existing = {
+        tool.get("function", {}).get("name") for tool in tools if isinstance(tool, dict)
+    }
+    data["tools"] = tools + [
+        stub
+        for stub in _STUB_TOOLS
+        if stub.get("function", {}).get("name") not in existing
+    ]
     return json.dumps(data).encode()
 
 
@@ -278,9 +293,6 @@ def _fetch(
         raise httpx.HTTPError(str(exc)) from exc
 
 
-_RETRY_DELAY_DEFAULT = 5.0
-
-
 def _is_usage_limit_error(resp: httpx.Response) -> bool:
     """Return True when a 429 body contains FreeUsageLimitError."""
     if resp.status_code != 429:
@@ -303,14 +315,7 @@ def _retry_delay(resp: httpx.Response) -> float:
     return _RETRY_DELAY_DEFAULT
 
 
-# ---------------------------------------------------------------------------
 # Shared httpx client — created once, reused across requests.
-# ---------------------------------------------------------------------------
-
-_shared_client: httpx.Client | None = None
-_shared_client_lock = threading.Lock()
-
-
 def _get_client(cfg_obj: Config) -> httpx.Client:
     """Return the shared ``httpx.Client``, creating it on first call."""
     global _shared_client
@@ -332,16 +337,7 @@ def _reset_client() -> None:
             _shared_client = None
 
 
-# ---------------------------------------------------------------------------
 # Concurrency limiter — prevents too many parallel upstream requests.
-# ---------------------------------------------------------------------------
-
-_request_semaphore: threading.Semaphore | None = None
-_semaphore_lock = threading.Lock()
-_last_start_monotonic: float = 0.0
-_pacing_lock = threading.Lock()
-
-
 def _get_semaphore(cfg_obj: Config) -> threading.Semaphore:
     """Return the request semaphore, creating it on first call."""
     global _request_semaphore
@@ -368,11 +364,7 @@ def _pace_start(cfg_obj: Config) -> None:
         _last_start_monotonic = time.monotonic()
 
 
-# ---------------------------------------------------------------------------
 # Rotation logging — shared between forward() and BridgeHandler.
-# ---------------------------------------------------------------------------
-
-
 def _log_rotation(rotated: bool, elapsed_s: float) -> None:
     if rotated:
         _log(f"[bridge] rotation took {elapsed_s:.1f}s")
@@ -522,7 +514,7 @@ def running(cfg_obj: cfg.Config) -> bool:
 
 
 def serve() -> None:
-    """Ensure the cascade is up and run the bridge server in the foreground.
+    """Start the cascade and run the bridge server in the foreground.
 
     Standalone bridge for testing (``openrot start bridge``): start it, then
     point any OpenAI-compatible client at the loopback URL and watch it route
@@ -582,6 +574,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     server_version = "openrot-bridge/1"
     protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:  # noqa: D102
+        self._handle("GET")
+
+    def do_POST(self) -> None:  # noqa: D102
+        self._handle("POST")
+
+    def do_OPTIONS(self) -> None:  # noqa: D102
+        self._handle("OPTIONS")
+
+    def do_PUT(self) -> None:  # noqa: D102
+        self._handle("PUT")
+
+    def do_DELETE(self) -> None:  # noqa: D102
+        self._handle("DELETE")
+
+    def do_PATCH(self) -> None:  # noqa: D102
+        self._handle("PATCH")
+
+    def do_HEAD(self) -> None:  # noqa: D102
+        self._handle("HEAD")
+
+    def log_message(self, format: str, *args: object) -> None:
+        """No-op: request logging handled by _log_request_console."""
 
     def _log_request_console(self, method: str) -> None:
         elapsed_s = self._elapsed_ms / 1000
@@ -683,30 +699,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._output_chars = sent
             self._status = resp.status_code
             self._log_request_console(method)
-
-    def do_GET(self) -> None:  # noqa: D102
-        self._handle("GET")
-
-    def do_POST(self) -> None:  # noqa: D102
-        self._handle("POST")
-
-    def do_OPTIONS(self) -> None:  # noqa: D102
-        self._handle("OPTIONS")
-
-    def do_PUT(self) -> None:  # noqa: D102
-        self._handle("PUT")
-
-    def do_DELETE(self) -> None:  # noqa: D102
-        self._handle("DELETE")
-
-    def do_PATCH(self) -> None:  # noqa: D102
-        self._handle("PATCH")
-
-    def do_HEAD(self) -> None:  # noqa: D102
-        self._handle("HEAD")
-
-    def log_message(self, format: str, *args: object) -> None:
-        """No-op: request logging handled by _log_request_console."""
 
 
 class Bridge(ThreadingHTTPServer):

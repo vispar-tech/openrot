@@ -4,10 +4,6 @@ import urllib.parse
 from dataclasses import dataclass
 
 
-class ParseError(Exception):
-    """Raised when a string cannot be parsed as a vless:// link."""
-
-
 @dataclass
 class VlessNode:
     """Parsed fields of a single vless:// link."""
@@ -109,3 +105,7 @@ def extract_from_text(text: str) -> list[str]:
     if decoded != text:
         return extract_vless_records(decoded)
     return []
+
+
+class ParseError(Exception):
+    """Raised when a string cannot be parsed as a vless:// link."""

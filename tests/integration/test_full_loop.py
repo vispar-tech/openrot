@@ -44,6 +44,17 @@ EGRESS_RE = re.compile(r'"ip":\s*"(\d+\.\d+\.\d+\.\d+)"')
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+TRANS_NET_ERRORS = (
+    "TimeoutException",
+    "ConnectError",
+    "ReadTimeout",
+    "NetworkError",
+    "ProxyError",
+    "RemoteProtocolError",
+    "ConnectionResetError",
+    "BrokenPipeError",
+)
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -97,18 +108,6 @@ def _disable_warp(cfg_path: Path) -> None:
     cfg_obj = load_config(path=cfg_path)
     cfg_obj.warp_enabled = False
     save_config(cfg_obj, cfg_path)
-
-
-TRANS_NET_ERRORS = (
-    "TimeoutException",
-    "ConnectError",
-    "ReadTimeout",
-    "NetworkError",
-    "ProxyError",
-    "RemoteProtocolError",
-    "ConnectionResetError",
-    "BrokenPipeError",
-)
 
 
 def _skip_on_transient_error(proc: subprocess.CompletedProcess[str]) -> None:

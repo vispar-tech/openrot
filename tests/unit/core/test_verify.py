@@ -18,6 +18,10 @@ _RELAY2 = (
 )
 
 
+def _parsed(raw: str = _RELAY) -> vless.VlessNode:
+    return vless.parse_vless(raw)
+
+
 def test_verify_pool_default_limits_cap_to_20() -> None:
     assert verify.TOP_LIMIT == 20
     assert (
@@ -53,21 +57,6 @@ def test_verify_progress_reports_each_node(monkeypatch: pytest.MonkeyPatch) -> N
     assert probe_done == [("probe", 1, 1)]
 
 
-def _parsed(raw: str = _RELAY) -> vless.VlessNode:
-    return vless.parse_vless(raw)
-
-
-class _Ctx:
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *a: object) -> bool:
-        return False
-
-    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> _Ctx:
-        return self
-
-
 def test_median() -> None:
     assert verify.median([]) == 0.0
     assert verify.median([10.0, 20.0, 30.0]) == 20.0
@@ -87,22 +76,6 @@ def test_tcp_reachable_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(verify.socket, "create_connection", refused)
     assert verify.tcp_reachable("1.1.1.1", 80, 1.0) is False
-
-
-class _TlsCtx:
-    check_hostname = False
-    verify_mode = None
-
-    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> _Ctx:
-        return _Ctx()
-
-
-class _TlsFailCtx:
-    check_hostname = False
-    verify_mode = None
-
-    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> object:
-        raise OSError("handshake failed")
 
 
 def test_tls_handshake_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,3 +269,30 @@ def test_nodes_from_proxy_survivors() -> None:
     assert nodes[1].raw == "socks5://2.2.2.2:1080"
     assert nodes[0].egress_ip is None
     assert nodes[1].egress_ip == "5.6.7.8"
+
+
+class _Ctx:
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *a: object) -> bool:
+        return False
+
+    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> _Ctx:
+        return self
+
+
+class _TlsCtx:
+    check_hostname = False
+    verify_mode = None
+
+    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> _Ctx:
+        return _Ctx()
+
+
+class _TlsFailCtx:
+    check_hostname = False
+    verify_mode = None
+
+    def wrap_socket(self, sock: object, server_hostname: str | None = None) -> object:
+        raise OSError("handshake failed")
