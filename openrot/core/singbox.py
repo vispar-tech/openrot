@@ -94,6 +94,9 @@ class SingBoxConfig:
     log: LogOptions = field(default_factory=LogOptions)
 
 
+EgressResult = tuple[bool, float | None, str | None]
+
+
 def _strip_none(value: Any) -> Any:
     """Recursively drop keys whose value is None (and prune empties in dicts)."""
     if isinstance(value, dict):
@@ -199,9 +202,6 @@ def _wait_for_port(host: str, port: int, timeout: float, step: float = 0.05) -> 
         except OSError:
             time.sleep(step)
     return False
-
-
-EgressResult = tuple[bool, float | None, str | None]
 
 
 def probe_vless(

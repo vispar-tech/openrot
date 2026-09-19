@@ -3,12 +3,6 @@ import pytest
 from openrot.providers import warp as w
 
 
-class _NoSleep:
-    @staticmethod
-    def sleep(seconds: float) -> None:
-        pass
-
-
 def _patch(monkeypatch: pytest.MonkeyPatch, status_values: list[w.WarpStatus]) -> None:
     calls = {"n": 0}
 
@@ -218,3 +212,9 @@ def test_current_ip_none_on_json_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(w.httpx.Client, "get", lambda self, url: _Resp())
     assert w.current_ip() is None
+
+
+class _NoSleep:
+    @staticmethod
+    def sleep(seconds: float) -> None:
+        pass

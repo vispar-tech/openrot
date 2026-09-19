@@ -32,6 +32,15 @@ class ServiceState(NamedTuple):
     bridge_running: bool
 
 
+class UpdateResult(NamedTuple):
+    """Result of a self-update check or install operation."""
+
+    current: str
+    latest: str
+    updated: bool
+    message: str
+
+
 def _check_services() -> ServiceState:
     """Check which openrot daemon/proxy/bridge processes are currently running."""
     daemon_pid = daemon.load_daemon_pid(cfg.DAEMON_PID_PATH)
@@ -63,15 +72,6 @@ def _print_new_version() -> None:
     """Print the freshly installed binary's version by re-exec'ing it."""
     binary = Path(sys.executable).resolve()
     subprocess.run([str(binary), "--version"], check=True)  # noqa: S603
-
-
-class UpdateResult(NamedTuple):
-    """Result of a self-update check or install operation."""
-
-    current: str
-    latest: str
-    updated: bool
-    message: str
 
 
 def _current_os() -> str:

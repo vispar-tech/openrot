@@ -47,9 +47,11 @@ profile_app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-app.add_typer(profile_app, name="profile")
 console = Console()
 events = log.get_logger()
+warp_app = typer.Typer(
+    help="Manage Cloudflare WARP", no_args_is_help=True, rich_markup_mode="rich"
+)
 
 
 @contextmanager
@@ -227,6 +229,9 @@ def profile_set(
         interval,
         enabled,
     )
+
+
+app.add_typer(profile_app, name="profile")
 
 
 @app.command("list")
@@ -754,11 +759,6 @@ def provider_cmd(
     status = "[green]enabled[/green]" if new_state else "[red]disabled[/red]"
     console.print(f"Provider {status}")
     events.info("[provider] %s", "enabled" if new_state else "disabled")
-
-
-warp_app = typer.Typer(
-    help="Manage Cloudflare WARP", no_args_is_help=True, rich_markup_mode="rich"
-)
 
 
 @warp_app.command("install")

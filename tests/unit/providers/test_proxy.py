@@ -7,36 +7,6 @@ from openrot.models import Node, NodeProtocol
 from openrot.providers import proxy
 
 
-class _FakeClient:
-    def __init__(self, response: object = None, error: object = None) -> None:
-        self._response = response
-        self._error = error
-
-    def get(self, *a: object, **k: object) -> object:
-        if self._error:
-            raise self._error
-        return self._response
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *a: object, **k: object) -> bool:
-        return False
-
-
-class _Response:
-    status_code = 204
-    text = ""
-
-    def raise_for_status(self) -> None:
-        pass
-
-
-class _BadResponse:
-    status_code = 503
-    text = ""
-
-
 def test_parse_proxy() -> None:
     assert proxy.parse_proxy("http://1.2.3.4:8080") == ("http", "1.2.3.4", 8080)
     assert proxy.parse_proxy("socks5://host.example:1080") == (
@@ -151,3 +121,33 @@ def test_check_proxy_node_uses_config_health_timeout(
 def test_check_proxy_node_dead_when_unparseable() -> None:
     node = Node(id="n", raw="http://no-port", protocol=NodeProtocol.HTTP)
     assert proxy.check_proxy_node(node, Config()) == (False, None)
+
+
+class _FakeClient:
+    def __init__(self, response: object = None, error: object = None) -> None:
+        self._response = response
+        self._error = error
+
+    def get(self, *a: object, **k: object) -> object:
+        if self._error:
+            raise self._error
+        return self._response
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *a: object, **k: object) -> bool:
+        return False
+
+
+class _Response:
+    status_code = 204
+    text = ""
+
+    def raise_for_status(self) -> None:
+        pass
+
+
+class _BadResponse:
+    status_code = 503
+    text = ""

@@ -28,14 +28,14 @@ from openrot.core.singbox import (
 )
 from openrot.providers import proxy, vless
 
-MAX_WORKERS = 16
-
-CHECK_LISTEN_PORT = 1
-
 Stage = Callable[[str, int, int], None]
 ProgressFn = Callable[[str, int, int], None]
 RelayCandidate = tuple[str, vless.VlessNode]
 ProxyKey = tuple[str, str, int]  # (protocol, host, port)
+
+MAX_WORKERS = 16
+
+CHECK_LISTEN_PORT = 1
 
 
 def median(values: list[float]) -> float:

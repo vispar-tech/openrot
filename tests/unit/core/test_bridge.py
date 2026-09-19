@@ -155,46 +155,28 @@ def test_ensure_tools_injects_stubs_when_missing() -> None:
     assert out["tools"][0]["type"] == "function"
 
 
-def test_ensure_tools_injects_stubs_when_single_tool() -> None:
+def test_ensure_tools_appends_stubs_when_single_tool() -> None:
     body = b'{"model": "big-pickle", "tools": [{"type": "function"}]}'
     out = json.loads(bridge._ensure_tools(body))
-    assert len(out["tools"]) == 2
+    assert len(out["tools"]) == 3
+    assert out["tools"][0] == {"type": "function"}
+    assert out["tools"][1:] == bridge._STUB_TOOLS
 
 
-def test_ensure_tools_keeps_two_or_more_tools() -> None:
+def test_ensure_tools_appends_stubs_to_two_or_more_tools() -> None:
     body = (
         b'{"model": "big-pickle", '
         b'"tools": [{"type": "function"}, {"type": "function"}]}'
     )
-    assert bridge._ensure_tools(body) == body
+    out = json.loads(bridge._ensure_tools(body))
+    assert len(out["tools"]) == 4
+    assert out["tools"][:2] == [{"type": "function"}, {"type": "function"}]
+    assert out["tools"][2:] == bridge._STUB_TOOLS
 
 
 def test_ensure_tools_leaves_invalid_and_empty_bodies() -> None:
     assert bridge._ensure_tools(b"") == b""
     assert bridge._ensure_tools(b"not json") == b"not json"
-
-
-class _FakeClient:
-    def __init__(self, responses: list[httpx.Response]) -> None:
-        self._responses = list(responses)
-        self.closed = False
-        self.last_url: str | None = None
-
-    def build_request(self, method: str, url: str, **kw: object) -> httpx.Request:
-        return httpx.Request(method, url, **kw)
-
-    def send(self, request: httpx.Request, *, stream: bool = True) -> httpx.Response:
-        self.last_url = str(request.url)
-        return self._responses.pop(0)
-
-    def close(self) -> None:
-        self.closed = True
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
 
 
 def test_forward_returns_upstream_response(
@@ -694,14 +676,6 @@ def test_serve_warns_when_binding_beyond_loopback(
     assert any("SECURITY" in msg for msg in logged)
 
 
-class _FakeStdout:
-    def __init__(self, tty: bool) -> None:
-        self._tty = tty
-
-    def isatty(self) -> bool:
-        return self._tty
-
-
 def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeServer:
         def __init__(self, host: str, port: int) -> None:
@@ -1092,3 +1066,34 @@ def test_bridge_server_binds_and_closes() -> None:
         assert server.server_address[1] > 0
     finally:
         server.server_close()
+
+
+class _FakeClient:
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self._responses = list(responses)
+        self.closed = False
+        self.last_url: str | None = None
+
+    def build_request(self, method: str, url: str, **kw: object) -> httpx.Request:
+        return httpx.Request(method, url, **kw)
+
+    def send(self, request: httpx.Request, *, stream: bool = True) -> httpx.Response:
+        self.last_url = str(request.url)
+        return self._responses.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class _FakeStdout:
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty

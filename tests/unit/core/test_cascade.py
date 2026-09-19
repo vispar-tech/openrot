@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 
 import pytest
@@ -5,17 +7,6 @@ import pytest
 from openrot.config import ActiveLevel
 from openrot.core import cascade
 from openrot.models import Config, Node, NodeStatus, Profile
-
-
-class _Events:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[object, ...]]] = []
-
-    def info(self, *args: object) -> None:
-        self.calls.append(("info", args))
-
-    def warning(self, *args: object) -> None:
-        self.calls.append(("warning", args))
 
 
 def _patch_events(monkeypatch: pytest.MonkeyPatch) -> _Events:
@@ -691,3 +682,14 @@ def test_rotate_waits_when_already_in_progress(
 
     assert call_count["n"] == 1
     assert sorted(returns) == [False, True]
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def info(self, *args: object) -> None:
+        self.calls.append(("info", args))
+
+    def warning(self, *args: object) -> None:
+        self.calls.append(("warning", args))
