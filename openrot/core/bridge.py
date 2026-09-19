@@ -28,6 +28,7 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
@@ -76,7 +77,7 @@ _OPENCODE_UA = "opencode/1.18.30 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
 # Stub tools injected into bodies that carry no (or too few) tools: the free
 # tier gateway requires a ``tools`` array with at least two elements and
 # validates the tool names against real opencode tools (bash, read, ...).
-_STUB_TOOLS = [
+_STUB_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
