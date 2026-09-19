@@ -26,3 +26,6 @@ dist/
 
 # Codegraph state
 .codegraph
+
+# Deepwork state (git-local, OpenCode-readable)
+.slim/deepwork/
