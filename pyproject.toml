@@ -12,7 +12,7 @@ dependencies = [
     "typer[all]>=0.12,<0.13",
     "rich>=13.0,<14",
     "pyyaml>=6.0,<7",
-    "pydantic>=2.0,<3",
+    "pydantic>=2.13.5,<3",
     "httpx[socks]>=0.27,<0.28",
     "json5>=0.9,<0.10",
 ]
@@ -36,7 +36,7 @@ pytest = "^9.1.1"
 ruff = "^0.16"
 mypy = "^2.3"
 pre-commit = "^4.0"
-pyinstaller = { version = "^6.22.2", python = ">=3.14,<3.16" }
+pyinstaller = { version = "^6.22.3", python = ">=3.14,<3.16" }
 pytest-cov = "^7.1.0"
 
 [tool.mypy]
