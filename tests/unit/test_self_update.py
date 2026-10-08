@@ -11,9 +11,7 @@ from openrot import self_update as su
 
 
 def _no_services() -> su.ServiceState:
-    return su.ServiceState(
-        daemon_running=False, proxy_running=False, bridge_running=False
-    )
+    return su.ServiceState(daemon_running=False, bridge_running=False)
 
 
 class TestVersionTuple:
@@ -132,9 +130,7 @@ class TestPerformUpdate:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = MagicMock(spec=httpx.Client)
-        state = su.ServiceState(
-            daemon_running=True, proxy_running=False, bridge_running=True
-        )
+        state = su.ServiceState(daemon_running=True, bridge_running=True)
         monkeypatch.setattr(su, "_check_services", lambda: state)
         monkeypatch.setattr(
             su,
@@ -270,69 +266,43 @@ class TestUpdateResult:
 
 class TestServiceState:
     def test_fields(self) -> None:
-        s = su.ServiceState(
-            daemon_running=True, proxy_running=False, bridge_running=True
-        )
+        s = su.ServiceState(daemon_running=True, bridge_running=True)
         assert s.daemon_running is True
-        assert s.proxy_running is False
         assert s.bridge_running is True
 
 
 class TestCheckServices:
     def test_nothing_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: None)
-        monkeypatch.setattr(su.proxy, "load_pid", lambda _: None)
         state = su._check_services()
         assert state.daemon_running is False
-        assert state.proxy_running is False
         assert state.bridge_running is False
 
     def test_daemon_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_load_daemon_pid(path: Path) -> int | None:
             return 123 if "bridge" not in str(path) else None
 
-        def fake_load_pid(path: Path) -> int | None:
-            return None
-
         monkeypatch.setattr(su.daemon, "load_daemon_pid", fake_load_daemon_pid)
-        monkeypatch.setattr(su.proxy, "load_pid", fake_load_pid)
-        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        monkeypatch.setattr(su.daemon, "is_running", lambda _: True)
         state = su._check_services()
         assert state.daemon_running is True
-        assert state.proxy_running is False
-        assert state.bridge_running is False
-
-    def test_proxy_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: None)
-        monkeypatch.setattr(su.proxy, "load_pid", lambda _: 456)
-        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
-        state = su._check_services()
-        assert state.daemon_running is False
-        assert state.proxy_running is True
         assert state.bridge_running is False
 
     def test_bridge_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_load_daemon_pid(path: Path) -> int | None:
             return 789 if "bridge" in str(path) else None
 
-        def fake_load_pid(path: Path) -> int | None:
-            return None
-
         monkeypatch.setattr(su.daemon, "load_daemon_pid", fake_load_daemon_pid)
-        monkeypatch.setattr(su.proxy, "load_pid", fake_load_pid)
-        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        monkeypatch.setattr(su.daemon, "is_running", lambda _: True)
         state = su._check_services()
         assert state.daemon_running is False
-        assert state.proxy_running is False
         assert state.bridge_running is True
 
     def test_all_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(su.daemon, "load_daemon_pid", lambda _: 123)
-        monkeypatch.setattr(su.proxy, "load_pid", lambda _: 456)
-        monkeypatch.setattr(su.proxy, "is_running", lambda _: True)
+        monkeypatch.setattr(su.daemon, "is_running", lambda _: True)
         state = su._check_services()
         assert state.daemon_running is True
-        assert state.proxy_running is True
         assert state.bridge_running is True
 
 
@@ -340,46 +310,37 @@ class TestStopServices:
     def test_stops_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stopped: list[str] = []
         monkeypatch.setattr(
-            su.proxy, "stop_proxy", lambda: stopped.append("proxy") or True
-        )
-        monkeypatch.setattr(
             su.daemon,
             "stop_and_wait",
             lambda p: stopped.append(str(p)) or True,
         )
         su._stop_services()
-        assert "proxy" in stopped
-        assert len(stopped) == 3  # proxy + daemon PID + bridge PID
+        assert len(stopped) == 2  # daemon PID + bridge PID
 
 
 class TestRestartServices:
-    def test_restarts_daemon_and_bridge(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_restarts_bridge(self, monkeypatch: pytest.MonkeyPatch) -> None:
         started: list[str] = []
         monkeypatch.setattr(
             su.daemon,
             "daemon_start_background",
             lambda name, pid: started.append(name),
         )
-        su._restart_services(
-            su.ServiceState(
-                daemon_running=True, proxy_running=False, bridge_running=True
-            )
-        )
-        assert started == ["cascade", "bridge"]
+        su._restart_services(su.ServiceState(daemon_running=True, bridge_running=True))
+        assert started == ["bridge"]
 
-    def test_restarts_daemon_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_restart_for_cascade_daemon(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cascade daemon lifecycle is gone — nothing is restarted for it."""
         started: list[str] = []
         monkeypatch.setattr(
             su.daemon,
             "daemon_start_background",
             lambda name, pid: started.append(name),
         )
-        su._restart_services(
-            su.ServiceState(
-                daemon_running=True, proxy_running=False, bridge_running=False
-            )
-        )
-        assert started == ["cascade"]
+        su._restart_services(su.ServiceState(daemon_running=True, bridge_running=False))
+        assert started == []
 
     def test_no_restart_when_not_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         started: list[str] = []
@@ -389,8 +350,6 @@ class TestRestartServices:
             lambda name, pid: started.append(name),
         )
         su._restart_services(
-            su.ServiceState(
-                daemon_running=False, proxy_running=False, bridge_running=False
-            )
+            su.ServiceState(daemon_running=False, bridge_running=False)
         )
         assert started == []

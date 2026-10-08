@@ -1,6 +1,7 @@
-"""Shared httpx client factory and egress-IP helper."""
+"""Shared httpx client factory, port probe, and egress-IP helper."""
 
 import contextlib
+import socket
 
 import httpx
 
@@ -28,3 +29,10 @@ def get_egress_ip(client: httpx.Client) -> str | None:
         if resp.status_code == 200:
             return resp.json().get("ip")
     return None
+
+
+def port_in_use(host: str, port: int) -> bool:
+    """Return True when something is already listening on `host:port`."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0

@@ -1,8 +1,7 @@
 """Shared daemon lifecycle: re-run a ``start <command>`` loop detached.
 
-Both ``cascade`` and ``bridge`` daemonize the same way — fork a background
-process detached from the terminal, remember the pid, and terminate it on
-demand — and only differ in the subcommand name and the pid path.
+The bridge daemonizes by forking a background process detached from the
+terminal, remembering the pid, and terminating it on demand.
 """
 
 import os
@@ -15,8 +14,7 @@ from pathlib import Path
 from rich.console import Console
 
 from openrot import log
-from openrot.core.pid import PidFile
-from openrot.core.proxy import is_running, load_daemon_pid, save_daemon_pid
+from openrot.core.pid import PidFile, is_running, load_daemon_pid, save_daemon_pid
 
 console = Console()
 events = log.get_logger()

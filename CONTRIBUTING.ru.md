@@ -68,10 +68,10 @@ poetry run pytest tests/test_foo.py
 Заведите issue через [шаблон баг-репорта](.github/ISSUE_TEMPLATE/bug_report.md)
 и приложите:
 
-- ваши команды и их вывод (например, `openrot doctor`),
+- ваши команды и их вывод (например, `openrot status --json`),
 - ваш `config.yaml` (уберьте чувствительное),
 - ОС и то, где вы работаете: хост или Docker,
-- версии sing-box и, если актуально, warp-cli.
+- версию warp-cli, если актуально.
 
 ## Лицензия
 

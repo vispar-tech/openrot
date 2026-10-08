@@ -7,42 +7,65 @@
 
 [English](README.md) · **Русский**
 
-Локальный ротатор прокси. Один файл конфигурации определяет **профили**
-(источники бесплатных нод) и их **ноды**. Трафик всегда идёт сначала через
-**Cloudflare WARP** (наивысший приоритет, не является нодой), затем вниз по
-цепочке: профили по своему `priority`, затем ноды по своему `priority`,
-до первой живой. Когда нода падает, openrot ротирует на следующую.
+Локальный WARP-мост. openrot поддерживает соединение с Cloudflare WARP и
+поднимает loopback HTTP-мост, который форвардит трафик opencode через него. Один
+файл конфигурации, одна движущаяся часть: WARP.
 
 > **Большое спасибо opencode за то, что он существует.** Проект строится
-> вокруг него: openrot держит каскад бесплатных нод живым и поднимает
-> loopback-bridge, чтобы opencode (и любой OpenAI-совместимый клиент)
-> продолжал работать на бесплатных провайдерах с автоматической ротацией.
+> вокруг него: openrot поднимает loopback-мост, чтобы opencode (и любой
+> OpenAI-совместимый клиент) продолжал работать на бесплатных
+> `opencode/*`-провайдерах с автоматической саморотацией при 429.
 
 ```
-WARP (включён по умолчанию)
-   │  warp_enabled: true, только на хосте (в Docker пропускается)
-   ▼
-Профиль A (priority 0) ── нода 0, нода 1, нода 2   ◀─ выбрать первую живую
-Профиль B (priority 1) ── нода 0, нода 1
-...
+opencode ──HTTP──▶ openrot bridge (127.0.0.1:7891)
+                        │
+                        ▼
+               WARP SOCKS5 (127.0.0.1:40000)
+                        │
+                        ▼
+               bridge_upstream (https://opencode.ai/zen)
 ```
 
 ## Зачем это нужно
 
-Публичные V2Ray-конфиги и списки прокси постоянно умирают. Вы добавляете
-несколько источников как профили, а openrot поддерживает их живыми: скачивает
-по расписанию, проверяет здоровье каждой ноды, выбирает лучшую и ротирует при
-падении WARP или ноды.
+Бесплатные провайдеры opencode лимитируют по сессии и IP. openrot держит вас на
+соединении с WARP и ставит перед opencode локальный **bridge**, который
+ротирует IP WARP в тот момент, когда апстрим отвечает `429` — долгие сессии
+продолжаются без ручного вмешательства. Ничего не хостится на сервере; всё
+работает на вашей машине.
+
+## Быстрая установка
+
+**Автономный бинарь** (macOS / Linux) — скачивает готовый релиз, ставит
+`warp-cli` и поднимает WARP:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh | bash
+```
+
+**Docker** (WARP по-прежнему работает на хосте) — ставит зависимости и запускает
+образ из GHCR:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install-docker.sh | bash
+```
+
+> Первый способ ставит автономный бинарь в `~/.local/lib/openrot`
+> (симлинк в `~/.local/bin/openrot`).
+> Если warp-cli у вас уже есть, запуск можно пропустить:
+> `OPENROT_SKIP_WARP=1 ... | bash`.
 
 ## Требования
 
-- Python 3.14+, [Poetry](https://python-poetry.org)
-- **sing-box** — внешний бинарник, НЕ Python-зависимость:
-  - macOS: `brew install sing-box`
-  - [GitHub Releases](https://github.com/SagerNet/sing-box/releases)
-- **warp-cli** (Cloudflare WARP) — опционально, только на хосте, в Docker нет
+- **warp-cli** (Cloudflare WARP) — обязателен в рантайме; работает на хосте, а
+  не внутри контейнера:
+  - macOS: `brew install --cask cloudflare-warp`
+  - Linux: [пакетный репозиторий Cloudflare](https://pkg.cloudflareclient.com/)
+  - `openrot warp install` печатает те же инструкции
+- Python 3.14+ и [Poetry](https://python-poetry.org) — только для запуска из
+  исходников
 
-## Установка
+## Установка (из исходников)
 
 ```bash
 poetry install
@@ -52,21 +75,15 @@ poetry run openrot --help
 ## Быстрый старт
 
 ```bash
-# 1. добавьте профиль-источник (репозиторий ссылок vless:// или прокси)
-poetry run openrot profile add gitlab https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/WHITE-CIDR-RU-all.txt --kind relay --priority 0
+# 1. подключите WARP (однократно; warp-cli должен быть установлен)
+poetry run openrot warp on
 
-# 2. скачайте его ноды
-poetry run openrot update --relay
+# 2. запустите локальный bridge (127.0.0.1:7891); Ctrl-C останавливает
+poetry run openrot start bridge
+# ...или как фоновый daemon
+poetry run openrot start bridge --daemon
 
-# 3. проверьте здоровье всех нод
-poetry run openrot test
-
-# 4. запустите локальный прокси (слушает 127.0.0.1:7890)
-poetry run openrot start cascade
-# в другом терминале:
-curl -x http://127.0.0.1:7890 https://ifconfig.me
-
-# 5. статус / ротация / остановка
+# 3. статус / ротация / остановка
 poetry run openrot status
 poetry run openrot rotate
 poetry run openrot stop
@@ -76,22 +93,26 @@ poetry run openrot stop
 
 | Команда | Описание |
 | --- | --- |
-| `openrot profile add NAME URL --kind relay\|proxy [--priority N] [--interval S] [--disabled]` | Добавить профиль-источник |
-| `openrot profile list [--json]` | Список профилей |
-| `openrot profile set NAME [--priority N] [--interval S] [--enabled\|--disabled]` | Обновить приоритет, интервал обновления или состояние профиля |
-| `openrot profile remove NAME` | Удалить профиль и его ноды |
-| `openrot list [--alive] [--json]` | Список нод по профилям |
-| `openrot test [--json]` | Проверка здоровья всех нод |
-| `openrot update [--relay] [--proxy] [--name X]` | Скачать ноды для всех включённых профилей (по умолчанию; фильтры через флаги) |
-| `openrot start cascade\|bridge [--daemon]` | Запустить каскад (в фореграунде логи идут в терминал; `--daemon` = в фоне) или `bridge` — сервер 429-ротации (в фореграунде или `--daemon` в фоне) |
-| `openrot stop [-y]` | Остановить активный стек: WARP или локальный прокси, плюс bridge-даемон |
-| `openrot status [--json] [-v\|--verbose]` | Текущий уровень и связность (--verbose = полная диагностика стека) |
-| `openrot rotate` | Сменить IP WARP или выбрать следующую ноду |
-| `openrot logs [-n N] [--follow/--no-follow]` | Следить за логами daemon, events и bridge одним потоком |
+| `openrot start bridge [--daemon]` | Запустить bridge opencode (в фореграунде или в фоне с `--daemon`) |
+| `openrot stop [-y\|--yes]` | Отключить WARP и остановить bridge-daemon |
+| `openrot status [--json] [-v\|--verbose]` | Статус WARP и bridge (--verbose = полная таблица диагностики) |
+| `openrot rotate` | Сменить IP WARP (переподключается и проверяет, что адрес действительно изменился) |
+| `openrot warp on\|off\|install` | Подключить / отключить WARP; `install` печатает инструкции по установке warp-cli |
+| `openrot warp status [--json]` | Статус WARP и исходящий IP |
+| `openrot logs [-n N] [--follow/--no-follow]` | Читать лог openrot (по умолчанию — следить) |
+| `openrot run -- <cmd>` | Запустить команду с proxy-переменными, указывающими на WARP (поднимет WARP при необходимости) |
 | `openrot config` | Открыть конфиг в $EDITOR (по умолчанию vim) |
-| `openrot warp on\|off\|install` | Включить/выключить (подключить/отключить) WARP |
-| `openrot warp status [--json]` | Статус WARP |
-| `openrot run -- <cmd>` | Выполнить команду с переменными окружения прокси |
+| `openrot provider [--action on\|off\|auto] [--config PATH]` | Переключить провайдер opencode в opencode.jsonc |
+| `openrot self-update [-y\|--yes]` | Обновить бинарь openrot до последнего релиза |
+| `openrot --version` | Показать версию и выйти |
+
+### `warp off` — временное состояние
+
+`openrot warp off` немедленно отключает WARP, и `openrot status` показывает
+«disconnected» — но пока bridge работает, его health loop переподключает WARP на
+следующей проверке: в пределах `health_interval` (по умолчанию 30 секунд). Если
+bridge не запущен, никто его не переподключит. `openrot stop` отключает WARP
+*и* останавливает bridge-daemon, поэтому стек остаётся выключенным.
 
 ## opencode (bridge)
 
@@ -100,7 +121,7 @@ opencode общается с openrot через loopback-**bridge** — без �
 ключ в конфиг:
 
 ```bash
-openrot start bridge           # каскад + bridge, в фореграунде; Ctrl-C для остановки
+openrot start bridge           # WARP + bridge, фореграунд; Ctrl-C для остановки
 openrot start bridge --daemon  # или как фоновый daemon-процесс
 ```
 
@@ -113,11 +134,11 @@ openrot start bridge --daemon  # или как фоновый daemon-проце�
 { "provider": { "opencode": { "options": { "baseURL": "http://127.0.0.1:7891/v1" } } } }
 ```
 
-`<bridge_port>` по умолчанию `7891` (поле конфига `bridge_port`). opencode видит
-только обычный loopback-HTTP — без TLS, без proxy-переменных, ничего не нужно
-восстанавливать; TLS на участке до апстрима терминирует сам bridge.
-Фоновый bridge-daemon останавливается через `openrot stop` (лог:
-`~/.config/openrot/openrot-bridge.log`).
+`bridge_port` по умолчанию `7891`. opencode видит только обычный loopback-HTTP —
+без TLS, без proxy-переменных, ничего не нужно восстанавливать; TLS на участке
+до апстрима открывает сам bridge через WARP. Фоновый bridge-daemon
+останавливается через `openrot stop`; его логи пишутся в
+`~/.config/openrot/openrot.log` (см. `openrot logs`).
 
 ```bash
 openrot status           # bridge: running (http://127.0.0.1:7891/v1)
@@ -128,147 +149,86 @@ curl -s http://127.0.0.1:7891/v1/models
 
 Прокси-туннель перенаправляет трафик opencode «вслепую», поэтому он не видит,
 что провайдер вернул HTTP `429` (запрос уже внутри TLS-CONNECT туннеля). Чтобы
-автоматически менять перегруженную ноду, укажите opencode на локальный **bridge**:
+автоматически менять перегруженный IP, укажите opencode на локальный **bridge**:
 loopback-прокси, совместимое с OpenAI (`baseURL`), которое форвардит каждый
-запрос *через активный каскад* и следит за статусом апстрима. При `429`
-он ротирует каскад (`openrot rotate` — следующая нода / WARP) и один раз
-повторяет запрос прозрачно.
+запрос *через SOCKS5-соединение WARP* к `bridge_upstream` и следит за статусом
+апстрима. При `429` с телом `FreeUsageLimitError` он ротирует IP WARP
+(`openrot rotate`) и повторяет запрос; остальные настроенные статусы ретрая
+сначала ждут по `Retry-After`. Число повторов ограничено
+`bridge_retry_attempts`.
 
 Апстрим и порт настраиваются — см. поля конфига `bridge_port` (по умолчанию
-`7891`) и `bridge_upstream` (по умолчанию `https://opencode.ai/zen/v1` — тот же
-endpoint, что opencode использует из коробки), либо
-env-переопределения `OPENROT_BRIDGE_PORT` и `OPENROT_UPSTREAM`.
+`7891`) и `bridge_upstream` (по умолчанию `https://opencode.ai/zen`; путь
+входящего запроса, например `/v1/chat/completions`, добавляется к этой базе),
+либо env-переопределения `OPENROT_BRIDGE_PORT` и `OPENROT_UPSTREAM`.
 
-## Бесплатные источники (профили)
+### Сессионные заголовки бесплатного тира
 
-Профиль — это URL, отдающий список нод. `--kind` указывает, как openrot будет
-его разбирать.
+Бесплатный тир opencode ориентируется на заголовок `X-Opencode-Session`:
+голый запрос без него попадает в анонимную квоту и может быть отклонён с
+`FreeUsageLimitError`. Когда `bridge_inject_session` включён (по умолчанию),
+bridge добавляет в каждый запрос к апстриму (если их ещё нет):
 
-### Релейные профили (`--kind relay`)
+- `X-Opencode-Session` — `ses_` + 26 цифр
+- `X-Opencode-Request` — `msg_` + 24 alnum
+- `User-Agent` opencode (не-opencode заменяется)
+- заглушки в массиве `tools` тел чатов (гейтвею бесплатного тира нужно
+  минимум два)
 
-Источники ссылок `vless://` — публичные репозитории и зеркала, публикующие
-ежедневные дампы рабочих конфигов:
-
-- [igareck/vpn-configs-for-russia](https://gitlab.com/igareck/vpn-configs-for-russia) — прямой raw-файл:
-  ```
-  https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/WHITE-CIDR-RU-all.txt
-  ```
-- Ищите в GitHub/GitLab `vless config list` / `v2ray subscription` — большинство
-  таких репозиториев подходит как relay-профиль.
-
-```bash
-poetry run openrot profile add gitlab <URL> --kind relay --priority 0
-poetry run openrot update --relay
-```
-
-> Сейчас разбирается только `vless://`. Файлы со смесью других протоколов
-> (hysteria2, vmess, ss) пока не поддерживаются. См. `NodeProtocol` в
-> `models/enums.py`.
-
-### Прокси-профили (`--kind proxy`)
-
-Источники бесплатных http / socks5 прокси, строки вида `proto://host:port`:
-
-- [proxifly/free-proxy-list](https://github.com/proxifly/free-proxy-list) — проверяется каждые 5 минут, отдаётся через CDN:
-  ```
-  https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt
-  ```
-  Только по протоколам: `.../proxies/protocols/http/data.txt`, `.../proxies/protocols/socks5/data.txt`.
-- Подойдут и зеркала free-proxy-list, и Telegram-каналы с ежедневными дампами.
+Значения, присланные клиентом, никогда не перезаписываются. Выключить можно
+через `bridge_inject_session: false` в конфиге или
+`OPENROT_BRIDGE_INJECT_SESSION=0`:
 
 ```bash
-poetry run openrot profile add proxifly <URL> --kind proxy --priority 10
-poetry run openrot update --proxy
+# через bridge: заголовки добавляются автоматически
+curl -s http://127.0.0.1:7891/v1/chat/completions \
+  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+
+# напрямую в апстрим: добавьте заголовок сами
+curl -s https://opencode.ai/zen/v1/chat/completions \
+  -H 'X-Opencode-Session: ses_<26 цифр>' \
+  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
 ```
-
-Свободные прокси — самый нестабильный слой, поэтому им обычно задают **низкий
-приоритет** (число `--priority` больше), чем relay-профилям: они подключаются,
-только когда релейная цепочка исчерпана. `update --proxy` держит топ-20 живых
-по задержке.
-
-### Приоритет и обновление
-
-- `--priority N`: меньше число, выше приоритет. Профили перебираются сверху
-  вниз, затем ноды внутри профиля по своей `priority`.
-- `--interval S`: секунды обновления профиля. По умолчанию — глобальный
-  `update_interval`. `openrot start cascade` обновляет профили по
-  истечении интервала. Ручной `openrot update` учитывает `--name` и фильтр
-  по протоколу.
-- `--disabled`: добавить профиль выключенным; включить можно правкой
-  `config.yaml`.
 
 ## Конфигурация
 
 Хранится в `~/.config/openrot/config.yaml`.
-Переопределяется переменными `OPENROT_DIR` (базовый каталог), `OPENROT_CONFIG`
-(полный путь), `OPENROT_PORT` (целое число), `OPENROT_SINGBOX_BIN` (имя/путь
-до бинарника sing-box), `OPENROT_BRIDGE_PORT` (целое число) и `OPENROT_UPSTREAM`
-(base URL апстрима bridge). Все стандартизированные поля — значения `StrEnum`.
+Переопределяется переменными `OPENROT_DIR` (базовый каталог) и `OPENROT_CONFIG`
+(полный путь).
 
 ```yaml
-port: 7890
-strategy: fallback        # fallback | urltest
-urltest_url: "https://www.gstatic.com/generate_204"   # целевой URL для замера задержки
-health_interval: 30
-health_timeout: 5
-fail_threshold: 3
-update_interval: 3600     # секунды; интервал обновления по умолчанию
-warp_enabled: true        # WARP = высший приоритет; выключить: 'openrot warp off'
-profiles:
-  - name: gitlab
-    kind: relay           # relay | proxy
-    url: https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/WHITE-CIDR-RU-all.txt
-    priority: 0           # меньше = выше
-    enabled: true
-    interval: null        # null → используется update_interval
-    nodes:
-      - id: "node-..."
-        raw: "vless://..."
-        protocol: vless   # vless | http | socks5
-        priority: 0
-        status: unknown   # unknown | alive | dead
-        latency_ms: null
-        fails: 0
-        last_check: null
-active_level: none        # none | warp | node
-current_node_id: null
-singbox_bin: "sing-box"
-bridge_port: 7891         # loopback-порт для bridge opencode
-bridge_upstream: "https://opencode.ai/zen/v1"
+health_interval: 30      # секунды между проверками здоровья WARP (health loop)
+active_level: none       # none | warp (пишется при start/stop)
+bridge_port: 7891        # loopback-порт для bridge opencode
+bridge_upstream: "https://opencode.ai/zen"  # путь запроса добавляется к этой базе
+bridge_retry_statuses: [429]   # статусы апстрима, вызывающие ретрай
+bridge_retry_attempts: 1       # максимум повторов на запрос
+bridge_max_concurrent: 3       # максимум параллельных запросов к апстриму
+bridge_min_interval: 0.5       # минимум секунд между стартами запросов к апстриму
+bridge_inject_session: true    # инъекция сессионных заголовков / UA / tools
 ```
 
-Латентность ноды — время HTTP-запроса к `urltest_url`
-(по умолчанию `https://www.gstatic.com/generate_204`); релейные ноды
-проверяются через sing-box, прокси — напрямую.
+### Переопределения через переменные окружения
 
-## Как проверяются ноды
+| Переменная | Эффект |
+| --- | --- |
+| `OPENROT_DIR` | базовый каталог (по умолчанию `~/.config/openrot`) |
+| `OPENROT_CONFIG` | полный путь файла конфигурации |
+| `OPENROT_LISTEN` | адрес бинда bridge (по умолчанию `127.0.0.1`; в Docker — например `0.0.0.0`) |
+| `OPENROT_BRIDGE_PORT` | → `bridge_port` |
+| `OPENROT_UPSTREAM` | → `bridge_upstream` |
+| `OPENROT_BRIDGE_RETRY_STATUSES` | → `bridge_retry_statuses` (список int через запятую) |
+| `OPENROT_BRIDGE_RETRY_ATTEMPTS` | → `bridge_retry_attempts` |
+| `OPENROT_BRIDGE_MAX_CONCURRENT` | → `bridge_max_concurrent` |
+| `OPENROT_BRIDGE_MIN_INTERVAL` | → `bridge_min_interval` |
+| `OPENROT_BRIDGE_INJECT_SESSION` | → `bridge_inject_session` (bool) |
+| `OPENROT_WARP` | имя/путь бинарника warp-cli (по умолчанию `warp-cli`) |
+| `OPENROT_WARP_HOST` / `OPENROT_WARP_PORT` | SOCKS5-адрес WARP (по умолчанию `127.0.0.1:40000`) |
+| `OPENROT_WARP_ROTATE_DELAY` / `OPENROT_WARP_ROTATE_ATTEMPTS` | темп ротации: секунды между попытками / максимум попыток (по умолчанию `10` / `5`) |
+| `OPENROT_DEBUG_REQ` | подробное логирование запросов bridge (секреты в auth-заголовках маскируются) |
 
-`openrot update` и планировщик прогоняют каждую полученную ноду через пайплайн:
-
-```
-parse (дедуп vless:// / proto://host:port)
-  -> доступность по TCP (параллельно, 50 воркеров)
-  -> TLS-хендшейк (только для tls/reality/wss нод)
-  -> sing-box check конфига (только relay)
-  -> HTTP-проба urltest_url через ноду
-```
-
-Проба — запрос к `urltest_url` (по умолчанию `generate_204`); нода выживает
-при ответе 2xx. Пробиваются все ноды, прошедшие предыдущие стадии (все
-параллельно), выжившие ранжируются по задержке (время запроса), публикуется
-**топ-20** (`TOP_LIMIT`) на профиль.
-
-Прогресс печатается вживую: `update` показывает постадийный счётчик/бар
-(`verify parse: 3/3`, `verify probe: 12/100`). `openrot test` заново проверяет
-опубликованные ноды тем же пайплайном.
-
-## Стратегии
-
-- `fallback` — первая живая нода сверху вниз по приоритету профиля/ноды (по умолчанию)
-- `urltest` — минимальная задержка среди живых нод
-
-В foreground-режиме текущая нода перепроверяется каждые `health_interval`
-секунд и ротируется при падении (`fail_threshold` сбоев подряд = нода dead).
+Пути рантайма, все внутри базового каталога: `config.yaml`,
+`openrot.log`, `openrot-bridge.daemon.pid`.
 
 ## Установка (самостоятельно / Docker)
 
@@ -293,84 +253,15 @@ curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh
 make install-docker # то же самое
 ```
 
-Переменные окружения: `OPENROT_IMAGE`, `OPENROT_PORT`, `OPENROT_CONFIG_DIR`,
-`OPENROT_WARP_HOST`, `NETWORK`.
-
-Доустановите и `sing-box`; openrot нуждается в нём для релейных
-нод (`brew install sing-box` на macOS).
+Переменные окружения: `OPENROT_IMAGE`, `OPENROT_BRIDGE_PORT`,
+`OPENROT_CONFIG_DIR`, `OPENROT_WARP_HOST`, `NETWORK`.
 
 ## Docker
 
-**WARP живёт на хосте, а не в контейнере.** `warp-cli` требует
-TUN-устройство и сетевой стек ОС, поэтому не может поднять туннель внутри
-Docker. Контейнер ходит к WARP хоста через его SOCKS5-upstream, так что WARP и
-цепочка нод работают вместе.
-
-### Makefile (для разработки)
-
-```bash
-make docker-run              # собирает образ и запускает openrot, подключённый к WARP хоста
-make docker-run MODE=both    # то же самое, но оба демона в фоне
-make docker-sh               # интерактивная оболочка в образе (конфиг смонтирован так же)
-```
-
-### Режимы запуска
-
-По умолчанию контейнер использует bridge-сеть и указывает на WARP хоста через
-`OPENROT_WARP_HOST=host.docker.internal` (порт хоста 40000):
-
-- macOS (Docker Desktop) — работает из коробки.
-- Linux — Makefile добавляет `--add-host host.docker.internal:host-gateway`.
-- На Linux можно вместо этого запустить `NETWORK=host make docker-run`: общий
-  loopback хоста, и WARP отвечает напрямую на `127.0.0.1:40000`.
-
-Контейнер принимает один аргумент — режим работы (CMD образа по умолчанию — `both`):
-
-| Режим      | Что запускается                                                              |
-|------------|------------------------------------------------------------------------------|
-| `cascade`  | Прокси/каскад в фореграунде; лог событий стримится в `docker logs`.          |
-| `bridge`   | Bridge 429-ротации в фореграунде (вместе с ним поднимается и каскад).        |
-| `both`     | Каскад + bridge как фоновые демоны, запускаются одновременно; `openrot logs` стримит их в stdout и держит контейнер живым. |
-
-```bash
-docker run --rm -it ... openrot cascade   # только прокси, логи в фореграунде
-docker run --rm -it ... openrot bridge    # только bridge, фореграунд
-docker run --rm -it ... openrot both      # оба демона в фоне, логи через `openrot logs`
-docker stop <container>                   # гасит супервизор; демоны умирают вместе с ним
-```
-
-### Запуск вручную
-
-```bash
-docker build -t openrot .
-docker run --rm -it \
-  -p 7890:7890 \
-  -p 7891:7891 \
-  --add-host host.docker.internal:host-gateway \
-  -e OPENROT_WARP_HOST=host.docker.internal \
-  -v $HOME/.config/openrot:/root/.config/openrot \
-  openrot both
-```
-
-### Что переопределяется / прокидывается
-
-- **Конфиг и данные** шарятся через mount `-v $HOME/.config/openrot:...`
-  (чтение/запись), поэтому профиль, добавленный на хосте (или в контейнере),
-  виден с обеих сторон. `OPENROT_DIR` уже задан как `/root/.config/openrot`
-  внутри образа (см. `Dockerfile`).
-- **Порты**: прокси слушает на `7890`, bridge — на `7891`; другой порт хоста
-  мапится через `-p $PORT:7890` / `-p $PORT_BRIDGE:7891`.
-- **Адрес прослушивания**: прокси и bridge по умолчанию биндятся на `127.0.0.1`;
-  в образе задан `OPENROT_LISTEN=0.0.0.0`, чтобы опубликованные порты были
-  доступны с хоста (переопределить — `-e OPENROT_LISTEN=127.0.0.1`).
-- **Адрес WARP**: `OPENROT_WARP_HOST` (по умолчанию `127.0.0.1`) и
-  `OPENROT_WARP_PORT` (по умолчанию `40000`) указывают openrot, где находится
-  SOCKS5-прокси WARP хоста. В контейнере задайте `OPENROT_WARP_HOST` = хост.
-- **`OPENROT_PORT` / `OPENROT_SINGBOX_BIN`**: задаются через `-e`, если нужно
-  переопределить сам `openrot`; `sing-box` уже установлен в образе.
-- **Режим при старте контейнера**: `docker run ... openrot cascade|bridge|both`
-  или перезапуск существующего — `docker start -ai <name> <mode>` (режим станет
-  командой контейнера).
+**WARP живёт на хосте, а не в контейнере.** `warp-cli` требует TUN-устройство
+и сетевой стек ОС, поэтому не может поднять туннель внутри Docker. Контейнер
+ходит к WARP хоста через его SOCKS5-прокси; образ запускает bridge (только
+bridge — больше openrot ничего не запускает).
 
 ### Сначала поднимите WARP на хосте
 
@@ -380,9 +271,51 @@ docker run --rm -it \
 poetry run openrot warp on
 ```
 
-Дальше его сможет использовать и контейнер, и openrot на хосте. Если WARP хоста
-недоступен, openrot падает на цепочку профилей + нод, а `status` показывается
-`WARP: available on host only`.
+### Makefile (для разработки)
+
+```bash
+make docker-run              # собирает образ и запускает openrot, подключённый к WARP хоста
+make docker-sh               # интерактивная оболочка в образе (конфиг смонтирован так же)
+```
+
+По умолчанию контейнер использует bridge-сеть и указывает на WARP хоста через
+`OPENROT_WARP_HOST=host.docker.internal` (порт хоста 40000):
+
+- macOS (Docker Desktop) — работает из коробки.
+- Linux — Makefile добавляет `--add-host host.docker.internal:host-gateway`.
+- На Linux можно вместо этого запустить `NETWORK=host make docker-run`: общий
+  loopback хоста, и WARP отвечает напрямую на `127.0.0.1:40000`.
+
+### Запуск вручную
+
+```bash
+docker build -t openrot .
+docker run --rm -it \
+  -p 7891:7891 \
+  --add-host host.docker.internal:host-gateway \
+  -e OPENROT_WARP_HOST=host.docker.internal \
+  -v $HOME/.config/openrot:/root/.config/openrot \
+  openrot
+```
+
+### Что переопределяется / прокидывается
+
+- **Конфиг и данные** шарятся через mount `-v $HOME/.config/openrot:...`
+  (чтение/запись), поэтому конфиг один и тот же на хосте и в контейнере.
+  `OPENROT_DIR` уже задан как `/root/.config/openrot` внутри образа
+  (см. `Dockerfile`).
+- **Порт**: bridge слушает на `7891`; другой порт хоста мапится через
+  `-p $PORT_BRIDGE:7891`.
+- **Адрес прослушивания**: bridge по умолчанию биндится на `127.0.0.1`;
+  в образе задан `OPENROT_LISTEN=0.0.0.0`, чтобы опубликованный порт был
+  доступен с хоста (переопределить — `-e OPENROT_LISTEN=127.0.0.1`).
+- **Адрес WARP**: `OPENROT_WARP_HOST` (по умолчанию `127.0.0.1`) и
+  `OPENROT_WARP_PORT` (по умолчанию `40000`) указывают openrot, где находится
+  SOCKS5-прокси WARP хоста. В контейнере задайте `OPENROT_WARP_HOST` = хост.
+
+Если WARP хоста недоступен, bridge всё равно стартует — health loop продолжает
+пробовать подключение каждые `health_interval` — и `openrot status` показывает
+`connectivity: FAIL`, пока WARP не поднимется.
 
 ## Разработка
 
@@ -390,13 +323,29 @@ poetry run openrot warp on
 - Норма покрытия: локально держим отчёт **выше 85 %**; в CI порог снижен
   (75 %) как нижний предел.
 
-## FAQ
+## Решение проблем
 
-**Что нужно хостить?**
-Ничего. openrot только скачивает чужие списки, проверяет их и поднимает
-локальный sing-box. На сервере ничего не хранится.
+**`status` показывает `connectivity: FAIL (WARP not forwarding traffic)`**
+Проверьте warp-cli: `openrot warp status`. Если warp-cli отсутствует —
+`openrot warp install`, затем `openrot warp on`.
 
-**Почему не одна нода?**
-Бесплатные источники умирают. openrot относится к ним как к пулу с
-приоритетами: когда верхняя нода падает, идёт ротация вниз по цепочке, а
-профили скачиваются заново по интервалу.
+**Я выполнил `openrot warp off`, но оно переподключается само**
+Ожидаемо, пока работает bridge: health loop переподключает WARP в пределах
+`health_interval` (по умолчанию 30 секунд). Чтобы выключить весь стек —
+`openrot stop`, либо сначала остановите bridge.
+
+**`bridge port 127.0.0.1:7891 is already in use; not starting`**
+Порт занят другим openrot (или зависшим daemon'ом). Выполните
+`openrot stop` или измените `bridge_port` / `OPENROT_BRIDGE_PORT`.
+
+**Bridge запущен, но запросы к апстриму возвращают 502**
+Не удалось получить ответ апстрима — обычно WARP выключен или недоступен.
+`openrot status --verbose` печатает таблицу диагностики; `openrot warp on`
+поднимет WARP обратно. Для логов по запросам задайте `OPENROT_DEBUG_REQ=1` и
+следите за ними через `openrot logs`.
+
+**В Docker контейнер не достаётся до WARP**
+Контейнер должен указывать на хост: `OPENROT_WARP_HOST=host.docker.internal`
+при bridge-сети (так делает Makefile), либо запускайте на Linux через
+`NETWORK=host make docker-run`, чтобы увидеть WARP хоста на
+`127.0.0.1:40000` напрямую.

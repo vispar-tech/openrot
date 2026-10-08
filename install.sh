@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/vispar-tech/openrot/main/install.sh | bash
 #
-# Installs warp-cli and sing-box prerequisites, downloads the openrot onedir
+# Installs the warp-cli prerequisite, downloads the openrot onedir
 # build (launcher + _internal/ payload) and brings WARP up on the host in
 # proxy mode.
 #
@@ -32,7 +32,7 @@ bin_dir="$PREFIX/bin"
 URL_BASE="${BIN_URL:-https://github.com/vispar-tech/openrot/releases/download/$VERSION}"
 
 # ---------------------------------------------------------------------------
-# Prerequisites: warp-cli + sing-box
+# Prerequisites: warp-cli
 # ---------------------------------------------------------------------------
 warp_bin() { command -v warp-cli || true; }
 
@@ -65,22 +65,10 @@ install_warp() {
     fi
 }
 
-check_singbox() {
-    if command -v sing-box >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "sing-box not found — openrot needs it for relay nodes. Install it:"
-    if macos; then
-        warn "  brew install sing-box"
-    else
-        warn "  https://github.com/SagerNet/sing-box/releases"
-    fi
-}
-
 start_warp() {
     [ -n "${OPENROT_SKIP_WARP:-}" ] && return 0
     if ! command -v warp-cli >/dev/null 2>&1; then
-        warn "warp-cli unusable — running node chain only."
+        warn "warp-cli unusable — WARP will not be available."
         return 0
     fi
     say "Bringing WARP up in proxy mode on the host..."
@@ -91,7 +79,7 @@ start_warp() {
     if warp-cli status 2>/dev/null | grep -qi Connected; then
         say "WARP connected (SOCKS5 on 127.0.0.1:40000)."
     else
-        warn "WARP did not report connected — openrot falls back to the node chain."
+        warn "WARP did not report connected — openrot will keep retrying."
     fi
 }
 
@@ -164,7 +152,6 @@ main() {
     resolve_latest
     install_warp
     start_warp
-    check_singbox
     download_binary
     "$lib_dir/openrot" --version
     say "Done. Run 'openrot --help' to get started."

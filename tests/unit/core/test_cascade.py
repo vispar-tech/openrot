@@ -6,7 +6,7 @@ import pytest
 
 from openrot.config import ActiveLevel
 from openrot.core import cascade
-from openrot.models import Config, Node, NodeStatus, Profile
+from openrot.models import Config
 
 
 def _patch_events(monkeypatch: pytest.MonkeyPatch) -> _Events:
@@ -15,525 +15,91 @@ def _patch_events(monkeypatch: pytest.MonkeyPatch) -> _Events:
     return events
 
 
-def test_start_foreground_interrupt_shuts_down(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def fake_start_warp(foreground: bool) -> bool:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cascade, "start_warp", fake_start_warp)
-    monkeypatch.setattr(cascade.signals, "keyboard_on_sigterm", lambda: None)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: calls.append("proxy"))
-    monkeypatch.setattr(cascade.warp, "disconnect", lambda: calls.append("warp"))
-    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
-    cfg_obj = Config(update_interval=0, active_level=ActiveLevel.NODE)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: cfg_obj)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c: None)
-
-    with pytest.raises(SystemExit) as exc:
-        cascade.start(True, False)
-
-    assert exc.value.code == 0
-    assert calls == ["proxy", "warp"]
-    assert cfg_obj.active_level == ActiveLevel.NONE
-    assert cfg_obj.current_node_id is None
-
-
-def test_start_foreground_interrupt_races_scheduler(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ctrl-C interacts safely with the refresh scheduler thread.
-
-    Shutdown wins and no scheduler write may resurrect the active level.
-    """
-    conf = Config(
-        update_interval=60,
-        active_level=ActiveLevel.NODE,
-        current_node_id="n1",
-        profiles=[Profile(name="p", nodes=[])],
-    )
-    scheduler_ready = threading.Event()
-    interrupt_now = threading.Event()
-    shutdown_calls: list[Config] = []
-
-    def fake_scheduler() -> None:
-        scheduler_ready.set()
-        interrupt_now.wait()
-
-    def fake_start_warp(foreground: bool) -> bool:
-        assert scheduler_ready.wait(timeout=5)
-        interrupt_now.set()
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cascade, "start_warp", fake_start_warp)
-    monkeypatch.setattr(cascade.refresh, "run_scheduler", fake_scheduler)
-    monkeypatch.setattr(cascade.signals, "keyboard_on_sigterm", lambda: None)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade.warp, "disconnect", lambda: None)
-    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
+def test_start_connects_warp(monkeypatch: pytest.MonkeyPatch) -> None:
+    conf = Config(active_level=ActiveLevel.NONE)
+    saved: list[Config] = []
+    _patch_events(monkeypatch)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
     monkeypatch.setattr(
-        cascade.cfg, "save_config", lambda c, path=None: shutdown_calls.append(c)
+        cascade.cfg, "save_config", lambda c, path=None: saved.append(c)
     )
+    monkeypatch.setattr(cascade.warp, "connect", lambda: True)
+    monkeypatch.setattr(cascade.warp, "proxy_address", lambda: ("127.0.0.1", 40000))
+    monkeypatch.setattr(cascade.warp, "current_ip", lambda: "9.9.9.9")
 
-    with pytest.raises(SystemExit) as exc:
-        cascade.start(True, False)
+    assert cascade.start() is True
+    assert conf.active_level == ActiveLevel.WARP
+    assert saved == [conf]
 
-    assert exc.value.code == 0
+
+def test_start_logs_and_returns_false_when_warp_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed connect logs a warning and returns False — never SystemExit."""
+    conf = Config(active_level=ActiveLevel.NONE)
+    events = _patch_events(monkeypatch)
+    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
+    monkeypatch.setattr(
+        cascade.cfg, "save_config", lambda c, path=None: pytest.fail("must not save")
+    )
+    monkeypatch.setattr(cascade.warp, "connect", lambda: False)
+
+    assert cascade.start() is False
     assert conf.active_level == ActiveLevel.NONE
-    assert conf.current_node_id is None
-    assert shutdown_calls[-1].active_level == ActiveLevel.NONE
-
-    fresh_node = Node(id="n2", raw="vless://b@2.2.2.2:80", status=NodeStatus.ALIVE)
-    cascade.refresh._commit_refresh(conf, {"p": [fresh_node]})
-    assert conf.profiles[0].nodes == [fresh_node]
-    assert conf.active_level == ActiveLevel.NONE
+    assert any(kind == "warning" for kind, _ in events.calls)
 
 
-def test_start_with_daemon_flag_forks(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"n": 0}
-
-    def fake_daemonize() -> None:
-        called["n"] += 1
-
-    monkeypatch.setattr(cascade, "daemonize", fake_daemonize)
-    cascade.start(False, True)
-    assert called["n"] == 1
-
-
-def test_start_foreground_exits_when_port_busy(
+def test_level_serving_tracks_warp_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cascade.proxy, "load_pid", lambda: None)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: True)
-    monkeypatch.setattr(cascade, "start_warp", lambda f: True)
-
-    with pytest.raises(SystemExit) as exc:
-        cascade.start(True, False)
-
-    assert exc.value.code == 1
-
-
-def test_start_exits_when_proxy_already_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    started = {"node": 0, "warp": 0}
-
-    def fake_load_pid() -> int:
-        return 4242
-
-    def fake_is_running(pid: int) -> bool:
-        return True
-
-    def fake_start_warp(foreground: bool) -> bool:
-        started["warp"] += 1
-        return False
-
-    def fake_start_node(foreground: bool) -> None:
-        started["node"] += 1
-
-    monkeypatch.setattr(cascade.proxy, "load_pid", fake_load_pid)
-    monkeypatch.setattr(cascade.proxy, "is_running", fake_is_running)
-    monkeypatch.setattr(cascade, "start_warp", fake_start_warp)
-    monkeypatch.setattr(cascade, "start_node", fake_start_node)
-    cfg_obj = Config(update_interval=0, port=1080)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: cfg_obj)
-
-    cascade.start(False, False)
-
-    assert started["node"] == 0
-    assert started["warp"] == 0
-
-
-def test_node_health_loop_rotates_when_current_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rotated = {"n": 0}
-    load_calls = {"n": 0}
-
-    def fake_rotate() -> None:
-        rotated["n"] += 1
-
-    def fake_load() -> Config:
-        load_calls["n"] += 1
-        if load_calls["n"] > 1:
-            raise SystemExit(0)
-        return Config(update_interval=0, active_level=ActiveLevel.NODE)
-
-    _patch_events(monkeypatch)
-    monkeypatch.setattr(cascade, "rotate", fake_rotate)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: None)
-    monkeypatch.setattr(cascade.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
-
-    with pytest.raises(SystemExit):
-        cascade.node_health_loop()
-
-    assert rotated["n"] == 1
-
-
-def test_node_health_loop_skips_rotate_when_not_node_level(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rotated = {"n": 0}
-
-    def fake_rotate() -> None:
-        rotated["n"] += 1
-
-    def fake_sleep(s: float) -> None:
-        fake_sleep.calls += 1
-        if fake_sleep.calls > 1:
-            raise SystemExit(0)
-
-    fake_sleep.calls = 0
-
-    _patch_events(monkeypatch)
-    monkeypatch.setattr(cascade, "rotate", fake_rotate)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: None)
-    monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-
-    with pytest.raises(SystemExit):
-        cascade.node_health_loop()
-
-    assert rotated["n"] == 0
-
-
-def test_rotate_node_stops_and_relaunches(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.ALIVE)
-    conf = Config(
-        update_interval=0,
-        active_level=ActiveLevel.NODE,
-        current_node_id="n1",
-        profiles=[Profile(name="p", nodes=[node])],
-    )
-    picks: list[object] = []
-    launched: list[object] = []
-
-    def fake_next(c: Config, current_id: str | None = None) -> Node:
-        picks.append(current_id)
-        return node
-
-    def fake_launch(c: Config, n: Node) -> int:
-        launched.append(n)
-        c.current_node_id = n.id
-        return 42
-
-    _patch_events(monkeypatch)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c: None)
-    monkeypatch.setattr(cascade.rotator, "next_node", fake_next)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: node)
-    monkeypatch.setattr(cascade, "launch", fake_launch)
-
-    cascade.rotate()
-
-    assert picks == ["n1"]
-    assert launched == [node]
-    assert conf.current_node_id == "n1"
-
-
-def test_rotate_first_resets_without_excluding_current(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.ALIVE)
-    conf = Config(
-        update_interval=0,
-        active_level=ActiveLevel.NODE,
-        current_node_id="n1",
-        profiles=[Profile(name="p", nodes=[node])],
-    )
-    picks: list[object] = []
-
-    def fake_first(c: Config) -> Node:
-        picks.append(None)
-        return node
-
-    def fake_launch(c: Config, n: Node) -> int:
-        c.current_node_id = n.id
-        return 42
-
-    _patch_events(monkeypatch)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c: None)
-    monkeypatch.setattr(cascade.rotator, "first_node", fake_first)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: node)
-    monkeypatch.setattr(cascade, "launch", fake_launch)
-
-    cascade.rotate(first=True)
-
-    assert picks == [None]
-    assert conf.current_node_id == "n1"
-
-
-def test_level_serving_requires_pid_and_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    conf = Config(update_interval=0, active_level=ActiveLevel.WARP)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
+    conf = Config(active_level=ActiveLevel.WARP)
     monkeypatch.setattr(cascade.warp, "is_connected", lambda: True)
-    monkeypatch.setattr(cascade.proxy, "load_pid", lambda: 1)
-    monkeypatch.setattr(cascade.proxy, "is_running", lambda pid: True)
     assert cascade.level_serving(conf) is True
 
     monkeypatch.setattr(cascade.warp, "is_connected", lambda: False)
     assert cascade.level_serving(conf) is False
 
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-    conf_node = Config(update_interval=0, active_level=ActiveLevel.NODE)
-    monkeypatch.setattr(cascade.proxy, "load_pid", lambda: None)
-    assert cascade.level_serving(conf_node) is False
-
-
-def test_launch_saves_pid_and_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80")
-    conf = Config(update_interval=0)
-    saved = []
-
-    monkeypatch.setattr(cascade.proxy, "start_node", lambda n, port, sb: 99)
-    monkeypatch.setattr(cascade.proxy, "save_pid", lambda pid: None)
-    monkeypatch.setattr(
-        cascade.cfg, "save_config", lambda c, path=None: saved.append(c)
-    )
-
-    pid = cascade.launch(conf, node)
-
-    assert pid == 99
-    assert conf.current_node_id == "n1"
-    assert saved == [conf]
-
-
-def test_shutdown_resets_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-    conf = Config(
-        update_interval=0, active_level=ActiveLevel.NODE, current_node_id="n1"
-    )
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: calls.append("proxy"))
-    monkeypatch.setattr(cascade.warp, "disconnect", lambda: calls.append("warp"))
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-
-    cascade._shutdown()
-
-    assert calls == ["proxy", "warp"]
-    assert conf.active_level == ActiveLevel.NONE
-    assert conf.current_node_id is None
-
-
-def test_start_foreground_no_warp_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-
-    def fake_start_warp(foreground: bool) -> bool:
-        calls.append("warp")
-        return False
-
-    def fake_start_node(foreground: bool) -> None:
-        calls.append("node")
-
-    monkeypatch.setattr(cascade, "start_warp", fake_start_warp)
-    monkeypatch.setattr(cascade, "start_node", fake_start_node)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-    monkeypatch.setattr(cascade, "port_in_use", lambda h, p: False)
-    monkeypatch.setattr(cascade.threading, "Thread", lambda **kw: None)
-
-    cascade.start(True, False)
-
-    assert calls == ["warp", "node"]
-
-
-def test_start_background_no_warp_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(cascade, "start_warp", lambda f: calls.append("warp") or False)
-    monkeypatch.setattr(cascade, "start_node", lambda f: calls.append("node"))
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-
-    cascade.start(False, False)
-
-    assert calls == ["warp", "node"]
-
-
-def test_start_node_no_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: Config(update_interval=0))
-    with pytest.raises(SystemExit):
-        cascade.start_node(False)
-
-
-def test_start_node_no_alive_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.DEAD)
-    conf = Config(update_interval=0, profiles=[Profile(name="p", nodes=[node])])
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-    monkeypatch.setattr(cascade.health, "test_all", lambda c: 0)
-    monkeypatch.setattr(cascade.rotator, "pick", lambda c, exclude_id=None: None)
-    _patch_events(monkeypatch)
-
-    with pytest.raises(SystemExit):
-        cascade.start_node(False)
-
-
-def test_start_node_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.ALIVE)
-    conf = Config(update_interval=0, profiles=[Profile(name="p", nodes=[node])])
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.rotator, "pick", lambda c, exclude_id=None: node)
-    monkeypatch.setattr(cascade, "launch", lambda c, n: 7)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-    _patch_events(monkeypatch)
-
-    cascade.start_node(False)
-
-    assert conf.active_level == ActiveLevel.NODE
-
-
-def test_start_node_no_alive_runs_health(monkeypatch: pytest.MonkeyPatch) -> None:
-    node = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.DEAD)
-    conf = Config(update_interval=0, profiles=[Profile(name="p", nodes=[node])])
-    calls: list[str] = []
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-    monkeypatch.setattr(cascade.health, "test_all", lambda c: calls.append("test") or 0)
-    monkeypatch.setattr(cascade.rotator, "pick", lambda c, exclude_id=None: node)
-    monkeypatch.setattr(cascade.proxy, "start_node", lambda n, port, sb: 7)
-    monkeypatch.setattr(cascade, "launch", lambda c, n: 7)
-    _patch_events(monkeypatch)
-
-    cascade.start_node(False)
-
-    assert "test" in calls
+    conf_none = Config(active_level=ActiveLevel.NONE)
+    assert cascade.level_serving(conf_none) is False
 
 
 def test_rotate_warp(monkeypatch: pytest.MonkeyPatch) -> None:
-    conf = Config(update_interval=0, active_level=ActiveLevel.WARP)
+    conf = Config(active_level=ActiveLevel.WARP)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
     monkeypatch.setattr(cascade.warp, "rotate", lambda: True)
     monkeypatch.setattr(cascade.warp, "current_ip", lambda: "9.9.9.9")
     _patch_events(monkeypatch)
 
-    cascade.rotate()
+    assert cascade.rotate() is True
 
 
-def test_rotate_no_alive_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    conf = Config(update_interval=0, active_level=ActiveLevel.NODE)
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: None)
-    monkeypatch.setattr(cascade.rotator, "pick", lambda c, exclude_id=None: None)
-    _patch_events(monkeypatch)
-
-    with pytest.raises(SystemExit):
-        cascade.rotate()
-
-
-def test_rotate_node_missing_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    dead = Node(id="n1", raw="vless://a@1.1.1.1:80", status=NodeStatus.DEAD)
-    alive = Node(id="n2", raw="vless://b@2.2.2.2:80", status=NodeStatus.ALIVE)
-
-    def fake_pick(c: Config, exclude_id: str | None = None) -> Node | None:
-        del c
-        return alive if exclude_id is None else None
-
-    conf = Config(
-        update_interval=0,
-        active_level=ActiveLevel.NODE,
-        current_node_id="n1",
-        profiles=[Profile(name="p", nodes=[dead, alive])],
-    )
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-    monkeypatch.setattr(cascade.health, "test_all", lambda c: 0)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    monkeypatch.setattr(cascade.nodes, "current_node", lambda c: dead)
-    monkeypatch.setattr(cascade.rotator, "pick", fake_pick)
-    monkeypatch.setattr(
-        cascade, "launch", lambda c, n: c.__setattr__("current_node_id", n.id) or 10
-    )
-    _patch_events(monkeypatch)
-
-    cascade.rotate()
-
-    assert conf.current_node_id == "n2"
-
-
-def test_stop_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    conf = Config(
-        update_interval=0, active_level=ActiveLevel.NODE, current_node_id="n1"
-    )
-    calls: list[str] = []
-    monkeypatch.setattr(
-        cascade.daemon, "stop", lambda path: calls.append("daemon") or False
-    )
-    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
-    monkeypatch.setattr(
-        cascade.proxy, "stop_proxy", lambda: calls.append("proxy") or True
-    )
-    monkeypatch.setattr(cascade.cfg, "save_config", lambda c, path=None: None)
-
-    cascade.stop()
-
-    assert "daemon" in calls
-    assert "proxy" in calls
-    assert conf.active_level == ActiveLevel.NONE
-
-
-def test_probe_connectivity_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Resp:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, str]:
-            return {"ip": "1.2.3.4"}
-
-    monkeypatch.setattr(cascade.httpx.Client, "get", lambda self, url: _Resp())
-    result = cascade.probe_connectivity(Config(update_interval=0, port=9999))
-    assert result == {"ok": True, "ip": "1.2.3.4"}
-
-
-def test_commit_health() -> None:
-    node = Node(id="n1", raw="x", fails=2, status=NodeStatus.ALIVE)
-    conf = Config(
-        update_interval=0, fail_threshold=3, profiles=[Profile(name="p", nodes=[node])]
-    )
-    reached, fails = cascade._commit_health(conf, "n1", False)
-    assert reached is True and fails == 3
-    assert node.status == NodeStatus.DEAD
-
-    reached, fails = cascade._commit_health(conf, "n1", True)
-    assert reached is False and fails == 0
-    assert node.fails == 0
-
-
-def test_warp_health_loop_falls_back_to_node(
+def test_warp_health_loop_reconnects_when_not_connected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When WARP drops, the loop stops the proxy and starts the node chain."""
-    call_count = {"n": 0}
+    """The loop retries the connect whenever WARP is down — it never returns."""
+    started = {"n": 0}
 
     def fake_sleep(s: float) -> None:
-        call_count["n"] += 1
+        pass
 
-    def fake_load() -> Config:
-        return Config(update_interval=0, health_interval=1)
-
-    def fake_is_connected() -> bool:
-        return False
+    def fake_start() -> bool:
+        started["n"] += 1
+        raise SystemExit(0)  # leave the infinite loop
 
     _patch_events(monkeypatch)
     monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
-    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
-    monkeypatch.setattr(cascade.warp, "is_connected", fake_is_connected)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    started_with: list[bool] = []
-    monkeypatch.setattr(cascade, "start_node", started_with.append)
+    monkeypatch.setattr(
+        cascade.cfg,
+        "load_config",
+        lambda: Config(health_interval=1),
+    )
+    monkeypatch.setattr(cascade.warp, "is_connected", lambda: False)
+    monkeypatch.setattr(cascade, "start", fake_start)
 
-    cascade.warp_health_loop()
+    with pytest.raises(SystemExit):
+        cascade.warp_health_loop()
 
-    assert call_count["n"] == 1
-    assert started_with == [True]
+    assert started["n"] == 1
 
 
 def test_warp_health_loop_continues_while_connected(
@@ -548,7 +114,7 @@ def test_warp_health_loop_continues_while_connected(
             raise SystemExit(0)
 
     def fake_load() -> Config:
-        return Config(update_interval=0, health_interval=1)
+        return Config(health_interval=1)
 
     def fake_is_connected() -> bool:
         return True
@@ -564,35 +130,10 @@ def test_warp_health_loop_continues_while_connected(
     assert call_count["n"] == 2
 
 
-def test_warp_health_loop_falls_back_without_foreground(
+def test_background_starts_warp_health_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In bridge-daemon mode the fallback starts the node chain non-foreground."""
-    call_count = {"n": 0}
-
-    def fake_sleep(s: float) -> None:
-        call_count["n"] += 1
-
-    def fake_load() -> Config:
-        return Config(update_interval=0, health_interval=1)
-
-    _patch_events(monkeypatch)
-    monkeypatch.setattr(cascade.time, "sleep", fake_sleep)
-    monkeypatch.setattr(cascade.cfg, "load_config", fake_load)
-    monkeypatch.setattr(cascade.warp, "is_connected", lambda: False)
-    monkeypatch.setattr(cascade.proxy, "stop_proxy", lambda: None)
-    started_with: list[bool] = []
-    monkeypatch.setattr(cascade, "start_node", started_with.append)
-
-    cascade.warp_health_loop(foreground=False)
-
-    assert started_with == [False]
-
-
-def test_background_starts_loops_and_scheduler(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """background() starts scheduler and both health loops as daemon threads."""
+    """background() starts only the warp health loop as a daemon thread."""
     started: list[dict[str, object]] = []
 
     class FakeThread:
@@ -603,45 +144,14 @@ def test_background_starts_loops_and_scheduler(
             pass
 
     monkeypatch.setattr(cascade.threading, "Thread", FakeThread)
-    monkeypatch.setattr(
-        cascade.cfg,
-        "load_config",
-        lambda: Config(update_interval=60, health_interval=1),
-    )
 
     cascade.background()
 
     names = {t["name"] for t in started}
-    assert names == {"openrot-scheduler", "openrot-node-health", "openrot-warp-health"}
+    assert names == {"openrot-warp-health"}
     assert all(t["daemon"] is True for t in started)
     warp = next(t for t in started if t["name"] == "openrot-warp-health")
-    assert warp["kwargs"] == {"foreground": False}
-
-
-def test_background_skips_scheduler_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With update_interval=0 only the health loops are started."""
-    started: list[dict[str, object]] = []
-
-    class FakeThread:
-        def __init__(self, **kwargs: object) -> None:
-            started.append(kwargs)
-
-        def start(self) -> None:
-            pass
-
-    monkeypatch.setattr(cascade.threading, "Thread", FakeThread)
-    monkeypatch.setattr(
-        cascade.cfg, "load_config", lambda: Config(update_interval=0, health_interval=1)
-    )
-
-    cascade.background()
-
-    assert {t["name"] for t in started} == {
-        "openrot-node-health",
-        "openrot-warp-health",
-    }
+    assert "kwargs" not in warp
 
 
 def test_rotate_waits_when_already_in_progress(
@@ -659,7 +169,7 @@ def test_rotate_waits_when_already_in_progress(
         rotate_proceed.wait(timeout=5)
         return True
 
-    conf = Config(update_interval=0, active_level=ActiveLevel.WARP)
+    conf = Config(active_level=ActiveLevel.WARP)
     monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
     monkeypatch.setattr(cascade.warp, "rotate", slow_warp_rotate)
     monkeypatch.setattr(cascade.warp, "current_ip", lambda: "1.1.1.1")
@@ -682,6 +192,25 @@ def test_rotate_waits_when_already_in_progress(
 
     assert call_count["n"] == 1
     assert sorted(returns) == [False, True]
+
+
+def test_stop_disconnects_warp_and_resets_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    conf = Config(active_level=ActiveLevel.WARP)
+    monkeypatch.setattr(
+        cascade.warp, "disconnect", lambda: calls.append("warp") or True
+    )
+    monkeypatch.setattr(cascade.cfg, "load_config", lambda: conf)
+    monkeypatch.setattr(
+        cascade.cfg, "save_config", lambda c, path=None: calls.append("save")
+    )
+
+    cascade.stop()
+
+    assert calls == ["warp", "save"]
+    assert conf.active_level == ActiveLevel.NONE
 
 
 class _Events:
