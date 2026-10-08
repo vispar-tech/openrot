@@ -1,16 +1,16 @@
-"""Loopback HTTP bridge that routes opencode traffic through the cascade.
+"""Loopback HTTP bridge that routes opencode traffic through WARP.
 
-``openrot start bridge`` brings the cascade up and serves the loopback bridge
-in the foreground (Ctrl-C stops it); ``openrot start bridge --daemon`` forks it
-into a persistent background process. opencode is pointed at the bridge via the
-manual ``provider.opencode.options.baseURL`` override in the README; ``status``
+``openrot start bridge`` brings WARP up and serves the loopback bridge in the
+foreground (Ctrl-C stops it); ``openrot start bridge --daemon`` forks it into a
+persistent background process. opencode is pointed at the bridge via the manual
+``provider.opencode.options.baseURL`` override in the README; ``status``
 reports whether the bridge is currently listening.
 
 Requests arrive as plain HTTP on 127.0.0.1 and are forwarded *through the
-active cascade* (the sing-box proxy on ``127.0.0.1:{cascade_port}``) to
-``bridge_upstream``. An upstream HTTP ``429`` rotates the cascade once
-(``cascade.rotate()`` — next node / WARP) and retries the request, so a
-rate-limited node is swapped out transparently. Only the upstream leg goes over
+active level* (the WARP SOCKS5 proxy on ``socks5://{warp_host}:{warp_port}``) to
+``bridge_upstream``. An upstream HTTP ``429`` rotates the WARP IP once
+(``cascade.rotate()``) and retries the request, so the rate-limited WARP IP is
+rotated out transparently. Only the upstream leg goes over
 TLS (handled by ``httpx``); the client leg is plain HTTP — unlike a CONNECT
 tunnel — so the 429 is visible here without any MITM.
 """
@@ -38,10 +38,10 @@ from openrot import config as cfg
 from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
-from openrot.core.http import make_client
-from openrot.core.singbox import port_in_use
+from openrot.core.http import make_client, port_in_use
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
+from openrot.providers import warp
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,8 @@ def upstream_url(cfg_obj: Config, path: str) -> str:
 
 
 def _client(cfg_obj: Config) -> httpx.Client:
-    proxy_url = f"http://127.0.0.1:{cfg_obj.port}"
+    w_host, w_port = warp.proxy_address()
+    proxy_url = f"socks5://{w_host}:{w_port}"
     return make_client(proxy=proxy_url, timeout=300)
 
 
@@ -515,11 +516,11 @@ def running(cfg_obj: cfg.Config) -> bool:
 
 
 def serve() -> None:
-    """Start the cascade and run the bridge server in the foreground.
+    """Start WARP and run the bridge server in the foreground.
 
     Standalone bridge for testing (``openrot start bridge``): start it, then
     point any OpenAI-compatible client at the loopback URL and watch it route
-    through the cascade with 429 self-rotation. Ctrl-C stops it.
+    through WARP with 429 self-rotation. Ctrl-C stops it.
     """
     cfg_obj = cfg.load_config()
     host = cfg.listen_address()
@@ -532,8 +533,11 @@ def serve() -> None:
     if not (
         cfg_obj.active_level != ActiveLevel.NONE and cascade.level_serving(cfg_obj)
     ):
-        console.print("no active level, starting cascade...")
-        cascade.start(False, False)
+        console.print("no active level, connecting warp...")
+        if not cascade.start():
+            console.print(
+                "[yellow]warp unavailable; the health loop will keep retrying[/yellow]"
+            )
         cfg_obj = cfg.load_config()
     cascade.background()
 
@@ -630,6 +634,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         req_id = getattr(self, "_req_id", "")
         if req_id:
             parts.append(f"req={req_id}")
+        ses_id = getattr(self, "_ses_id", "")
+        if ses_id:
+            parts.append(f"ses={ses_id}")
         _log(f"[bridge] {' '.join(parts)}")
 
     def _inspect_body(self, body: bytes) -> None:
@@ -652,6 +659,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._prompt_chars = prompt_chars
         self._req_id = next(
             (v for k, v in self.headers.items() if k.lower() == "x-opencode-request"),
+            "",
+        ).rsplit("/", 1)[-1]
+        self._ses_id = next(
+            (v for k, v in self.headers.items() if k.lower() == "x-opencode-session"),
             "",
         ).rsplit("/", 1)[-1]
 

@@ -86,8 +86,6 @@ jobs:
         run: poetry install
       - name: Run tests with coverage (fails if below threshold)
         run: poetry run pytest --cov=openrot --cov-fail-under=75
-      - name: Run integration tests (best-effort, may skip)
-        run: poetry run pytest tests/integration -m integration --no-cov -q
 
   docker:
     name: Docker build

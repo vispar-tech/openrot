@@ -1,9 +1,8 @@
 import os
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -15,16 +14,8 @@ except ImportError:
 from pydantic import ValidationError
 
 from openrot.models import (
-    TOP_LIMIT,
     ActiveLevel,
     Config,
-    Node,
-    NodeProtocol,
-    NodeStatus,
-    Profile,
-    ProfileKind,
-    Strategy,
-    node_id,
 )
 
 __all__ = [
@@ -32,21 +23,11 @@ __all__ = [
     "CONFIG_PATH",
     "DAEMON_PID_PATH",
     "LOG_PATH",
-    "PID_PATH",
-    "TOP_LIMIT",
     "ActiveLevel",
     "Config",
     "ConfigError",
-    "Node",
-    "NodeProtocol",
-    "NodeStatus",
-    "Profile",
-    "ProfileKind",
-    "Strategy",
     "load_config",
-    "node_id",
     "save_config",
-    "update_config",
 ]
 
 
@@ -64,10 +45,6 @@ def _config_path() -> Path:
     return _base_dir() / "config.yaml"
 
 
-def _pid_path() -> Path:
-    return _base_dir() / "openrot.pid"
-
-
 def _daemon_pid_path() -> Path:
     return _base_dir() / "openrot.daemon.pid"
 
@@ -81,7 +58,6 @@ def _log_path() -> Path:
 
 
 CONFIG_PATH = _config_path()
-PID_PATH = _pid_path()
 DAEMON_PID_PATH = _daemon_pid_path()
 BRIDGE_PID_PATH = _bridge_pid_path()
 LOG_PATH = _log_path()
@@ -159,10 +135,6 @@ def _env_bool(name: str, attr: str, cfg: Config) -> None:
 
 
 def _apply_env_overrides(cfg: Config) -> Config:
-    _env_int("OPENROT_PORT", "port", cfg)
-    singbox_bin = os.environ.get("OPENROT_SINGBOX_BIN")
-    if singbox_bin:
-        cfg.singbox_bin = singbox_bin
     _env_int("OPENROT_BRIDGE_PORT", "bridge_port", cfg)
     bridge_upstream = os.environ.get("OPENROT_UPSTREAM")
     if bridge_upstream:
@@ -172,7 +144,6 @@ def _apply_env_overrides(cfg: Config) -> Config:
     _env_int("OPENROT_BRIDGE_MAX_CONCURRENT", "bridge_max_concurrent", cfg)
     _env_float("OPENROT_BRIDGE_MIN_INTERVAL", "bridge_min_interval", cfg)
     _env_bool("OPENROT_BRIDGE_INJECT_SESSION", "bridge_inject_session", cfg)
-    _env_int("OPENROT_MAX_WORKERS", "max_workers", cfg)
     return cfg
 
 
@@ -224,22 +195,6 @@ def save_config(cfg: Config, path: Path = CONFIG_PATH) -> None:
     """Atomically write configuration to `path` (temp file + rename)."""
     with _file_lock(path):
         _save_unlocked(cfg, path)
-
-
-def update_config(path: Path, mutator: Callable[[Config], Any]) -> Any:
-    """Atomically load the persisted config, apply `mutator`, and save it.
-
-    The whole read-modify-write runs under a single file lock, so concurrent
-    writers (scheduler and health loops in the daemon) cannot clobber each
-    other's updates. `mutator` must be side-effect free apart from editing the
-    Config it receives (no network or blocking I/O). Its return value is
-    forwarded to the caller.
-    """
-    with _file_lock(path):
-        cfg = _load_unlocked(path)
-        result = mutator(cfg)
-        _save_unlocked(cfg, path)
-        return result
 
 
 class ConfigError(ValueError):

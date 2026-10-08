@@ -68,10 +68,10 @@ poetry run pytest tests/test_foo.py
 Open an issue with the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md)
 and include:
 
-- your command(s) and their output (e.g. `openrot doctor`),
+- your command(s) and their output (e.g. `openrot status --json`),
 - your `config.yaml` (redact anything sensitive),
 - OS + whether you are on the host or in Docker,
-- the sing-box and, if relevant, warp-cli versions.
+- the warp-cli version, if relevant.
 
 ## License
 

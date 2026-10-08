@@ -2,9 +2,8 @@
 
 POETRY ?= poetry
 DOCKER ?= docker
-PORT ?= 7890
 BRIDGE_PORT ?= 7891
-MODE ?= cascade
+MODE ?= bridge
 CONFIG_DIR ?= $(HOME)/.config/openrot
 # WARP runs on the host, not in the container. Default bridge network reaches it
 # via OPENROT_WARP_HOST (host.docker.internal works on Docker Desktop and on
@@ -68,7 +67,6 @@ docker-run: docker-build ## Run openrot in Docker, wired to the host-side WARP
 			openrot $(MODE); \
 	else \
 		$(DOCKER) run --rm -it --network bridge \
-			-p $(PORT):7890 \
 			-p $(BRIDGE_PORT):7891 \
 			--add-host host.docker.internal:host-gateway \
 			-e OPENROT_WARP_HOST=$(WARP_HOST) \
@@ -83,7 +81,6 @@ docker-sh: docker-build ## Open a shell inside the running image
 			--entrypoint /bin/sh openrot; \
 	else \
 		$(DOCKER) run --rm -it --network bridge \
-			-p $(PORT):7890 \
 			--add-host host.docker.internal:host-gateway \
 			-e OPENROT_WARP_HOST=$(WARP_HOST) \
 			-v $(CONFIG_DIR):/root/.config/openrot \

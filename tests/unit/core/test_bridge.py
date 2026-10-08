@@ -21,7 +21,6 @@ from openrot.core import bridge, daemon
 
 def _cfg(**kw: object) -> Config:
     defaults: dict[str, object] = {
-        "port": 7890,
         "bridge_upstream": "https://up.test/v1",
     }
     defaults.update(kw)
@@ -41,6 +40,22 @@ def test_upstream_url_uses_configured_upstream() -> None:
         bridge.upstream_url(_cfg(bridge_upstream="http://local:9/x"), "y")
         == "http://local:9/x/y"
     )
+
+
+def test_client_proxies_through_warp_socks5(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The upstream client talks straight to WARP's SOCKS5 listener."""
+    captured: dict[str, object] = {}
+
+    def fake_make_client(**kw: object) -> None:
+        captured.update(kw)
+
+    monkeypatch.setattr(bridge.warp, "proxy_address", lambda: ("127.0.0.1", 40000))
+    monkeypatch.setattr(bridge, "make_client", fake_make_client)
+
+    bridge._client(_cfg())
+
+    assert captured["proxy"] == "socks5://127.0.0.1:40000"
+    assert captured["timeout"] == 300
 
 
 def _usage_limit_body() -> bytes:
@@ -497,17 +512,55 @@ def test_serve_starts_cascade_and_listens(
 
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: False)
     monkeypatch.setattr(bridge.cascade, "background", lambda: None)
-    started: list[tuple[bool, bool]] = []
-    monkeypatch.setattr(bridge.cascade, "start", lambda f, d: started.append((f, d)))
+    started: list[str] = []
+    monkeypatch.setattr(
+        bridge.cascade, "start", lambda: started.append("start") or True
+    )
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
     bridge.serve()
-    assert started == [(False, False)]
+    assert started == ["start"]
+
+
+def test_serve_keeps_serving_when_warp_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed warp connect logs a warning but the bridge keeps serving."""
+
+    class FakeServer:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    console_printed: list[str] = []
+    monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: False)
+    monkeypatch.setattr(bridge.cascade, "background", lambda: None)
+    monkeypatch.setattr(bridge.cascade, "start", lambda: False)
+    monkeypatch.setattr(
+        bridge.cfg,
+        "load_config",
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NONE),
+    )
+    monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
+    monkeypatch.setattr(bridge, "Bridge", FakeServer)
+    monkeypatch.setattr(
+        bridge.console, "print", lambda *a, **k: console_printed.append(str(a[0]))
+    )
+
+    bridge.serve()
+
+    assert any("warp unavailable" in msg for msg in console_printed)
 
 
 def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -524,12 +577,12 @@ def test_serve_skips_start_when_serving(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
     monkeypatch.setattr(bridge.cascade, "background", lambda: None)
-    started: list = []
-    monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
+    started: list[str] = []
+    monkeypatch.setattr(bridge.cascade, "start", lambda: started.append("start"))
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -552,7 +605,7 @@ def test_serve_starts_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
             pass
 
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
-    monkeypatch.setattr(bridge.cascade, "start", lambda *a: None)
+    monkeypatch.setattr(bridge.cascade, "start", lambda: True)
     background_calls: list[int] = []
     monkeypatch.setattr(
         bridge.cascade, "background", lambda: background_calls.append(1)
@@ -560,7 +613,7 @@ def test_serve_starts_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "Bridge", FakeServer)
@@ -571,14 +624,14 @@ def test_serve_starts_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_serve_exits_when_port_busy(monkeypatch: pytest.MonkeyPatch) -> None:
-    started: list = []
+    started: list[str] = []
     monkeypatch.setattr(bridge.cascade, "level_serving", lambda cfg_obj: True)
     monkeypatch.setattr(bridge.cascade, "background", lambda: None)
-    monkeypatch.setattr(bridge.cascade, "start", lambda *a: started.append(a))
+    monkeypatch.setattr(bridge.cascade, "start", lambda: started.append("start"))
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: True)
 
@@ -664,7 +717,7 @@ def test_serve_warns_when_binding_beyond_loopback(
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
@@ -695,7 +748,7 @@ def test_serve_hides_ctrl_c_tip_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
@@ -731,7 +784,7 @@ def test_serve_shows_ctrl_c_tip_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(
         bridge.cfg,
         "load_config",
-        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.NODE),
+        lambda: _cfg(bridge_port=7891, active_level=ActiveLevel.WARP),
     )
     monkeypatch.setattr(bridge, "port_in_use", lambda h, p: False)
     monkeypatch.setattr(bridge, "_log", lambda msg: printed.append(msg))
@@ -936,10 +989,11 @@ def test_respond_counts_streamed_output_bytes() -> None:
 def test_handler_logs_status_and_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
     body = b'{"model":"gpt-4o","messages":[{"content":"hi"}]}'
     req_id = "ses_abc123/msg_a1b2c3d4e5f6g7h8i9j0"
+    ses_id = "ses_01234567890123456789012345"
     handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
     handler.headers = SimpleNamespace(
         get=lambda k, d="": len(body) if k == "Content-Length" else d,
-        items=lambda: [("x-opencode-request", req_id)],
+        items=lambda: [("x-opencode-request", req_id), ("x-opencode-session", ses_id)],
     )
     handler.rfile = SimpleNamespace(read=lambda n: body)
     handler.path = "/v1/chat/completions"
@@ -966,6 +1020,7 @@ def test_handler_logs_status_and_request_id(monkeypatch: pytest.MonkeyPatch) -> 
     assert "output=1.5k" in line
     assert "status=429" in line
     assert "req=msg_a1b2c3d4e5f6g7h8i9j0" in line
+    assert f"ses={ses_id}" in line
 
 
 def test_handler_retries_without_rotation_after_upstream_error(

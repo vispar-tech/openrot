@@ -11,8 +11,7 @@
 #
 # Env overrides:
 #   OPENROT_IMAGE        image name (default: ghcr.io/vispar-tech/openrot:latest)
-#   OPENROT_MODE         run mode: cascade | bridge | both (default: both)
-#   OPENROT_PORT         host port (default: 7890)
+#   OPENROT_MODE         run mode: bridge (default: bridge)
 #   OPENROT_BRIDGE_PORT  host bridge port (default: 7891)
 #   OPENROT_CONFIG_DIR   config dir (default: ~/.config/openrot)
 #   OPENROT_WARP_HOST    WARP upstream host for bridge mode (default: host.docker.internal)
@@ -21,8 +20,7 @@
 set -euo pipefail
 
 IMAGE="${OPENROT_IMAGE:-ghcr.io/vispar-tech/openrot:latest}"
-MODE="${OPENROT_MODE:-both}"
-PORT="${OPENROT_PORT:-7890}"
+MODE="${OPENROT_MODE:-bridge}"
 BRIDGE_PORT="${OPENROT_BRIDGE_PORT:-7891}"
 CONFIG_DIR="${OPENROT_CONFIG_DIR:-$HOME/.config/openrot}"
 WARP_HOST="${OPENROT_WARP_HOST:-host.docker.internal}"
@@ -86,7 +84,7 @@ install_warp() {
 
 start_warp() {
     if ! command -v warp-cli >/dev/null 2>&1; then
-        warn "warp-cli unusable — container will run the node chain only."
+        warn "warp-cli unusable — WARP will not be available."
         return 0
     fi
     say "Bringing WARP up in proxy mode on the host..."
@@ -97,7 +95,7 @@ start_warp() {
     if warp-cli status 2>/dev/null | grep -qi Connected; then
         say "WARP connected (SOCKS5 on 127.0.0.1:40000)."
     else
-        warn "WARP did not report connected — openrot falls back to the node chain."
+        warn "WARP did not report connected — openrot will keep retrying."
     fi
 }
 
@@ -125,7 +123,7 @@ NET="${NETWORK:-}"
 [ -n "$NET" ] || { linux && NET=host || NET=bridge; }
 
 run_container() {
-    say "Mode: $MODE (cascade | bridge | both — set OPENROT_MODE to override)."
+    say "Mode: $MODE (only 'bridge' is valid — set OPENROT_MODE to override)."
     if [ "$NET" = "host" ]; then
         say "Using host network — WARP visible at 127.0.0.1:40000."
         exec docker run --rm -it --network host \
@@ -134,7 +132,6 @@ run_container() {
     fi
     say "Using bridge network — WARP at $WARP_HOST:40000."
     exec docker run --rm -it --network bridge \
-        -p "$PORT":7890 \
         -p "$BRIDGE_PORT":7891 \
         --add-host host.docker.internal:host-gateway \
         -e OPENROT_WARP_HOST="$WARP_HOST" \

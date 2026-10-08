@@ -21,9 +21,6 @@ htmlcov/
 build/
 dist/
 
-# sing-box runtime
-*.json.tmp
-
 # Codegraph state
 .codegraph
 

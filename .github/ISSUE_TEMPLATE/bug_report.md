@@ -21,5 +21,4 @@ with any secrets removed.
 
 - OS:
 - Host or Docker:
-- sing-box version:
 - warp-cli version if used:

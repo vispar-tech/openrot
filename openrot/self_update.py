@@ -16,7 +16,7 @@ import httpx
 
 from openrot import __version__
 from openrot import config as cfg
-from openrot.core import daemon, proxy
+from openrot.core import daemon
 from openrot.core.http import make_client
 
 GH_REPO = "vispar-tech/openrot"
@@ -28,7 +28,6 @@ class ServiceState(NamedTuple):
     """Tracks which openrot services were running before an update."""
 
     daemon_running: bool
-    proxy_running: bool
     bridge_running: bool
 
 
@@ -42,28 +41,23 @@ class UpdateResult(NamedTuple):
 
 
 def _check_services() -> ServiceState:
-    """Check which openrot daemon/proxy/bridge processes are currently running."""
+    """Check which openrot daemon/bridge processes are currently running."""
     daemon_pid = daemon.load_daemon_pid(cfg.DAEMON_PID_PATH)
-    proxy_pid = proxy.load_pid(cfg.PID_PATH)
     bridge_pid = daemon.load_daemon_pid(cfg.BRIDGE_PID_PATH)
     return ServiceState(
-        daemon_running=daemon_pid is not None and proxy.is_running(daemon_pid),
-        proxy_running=proxy_pid is not None and proxy.is_running(proxy_pid),
-        bridge_running=bridge_pid is not None and proxy.is_running(bridge_pid),
+        daemon_running=daemon_pid is not None and daemon.is_running(daemon_pid),
+        bridge_running=bridge_pid is not None and daemon.is_running(bridge_pid),
     )
 
 
 def _stop_services() -> None:
-    """Stop all openrot daemon and proxy processes gracefully."""
-    proxy.stop_proxy()
+    """Stop openrot daemon processes gracefully."""
     daemon.stop_and_wait(cfg.DAEMON_PID_PATH)
     daemon.stop_and_wait(cfg.BRIDGE_PID_PATH)
 
 
 def _restart_services(state: ServiceState) -> None:
     """Restart openrot services that were running before the update."""
-    if state.daemon_running:
-        daemon.daemon_start_background("cascade", cfg.DAEMON_PID_PATH)
     if state.bridge_running:
         daemon.daemon_start_background("bridge", cfg.BRIDGE_PID_PATH)
 
@@ -159,7 +153,7 @@ def perform_update(
 ) -> UpdateResult:
     """Download and install the latest release, replacing the current binary."""
     state = _check_services()
-    if state.daemon_running or state.proxy_running or state.bridge_running:
+    if state.daemon_running or state.bridge_running:
         _stop_services()
     close = client is None
     if client is None:

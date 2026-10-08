@@ -1,6 +1,6 @@
 [project]
 name = "openrot"
-description = "Local proxy rotator with WARP → VLESS → free proxies cascade"
+description = "Local WARP bridge for opencode: routes traffic through a Cloudflare WARP connection"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -50,10 +50,7 @@ warn_return_any = false
 namespace_packages = true
 
 [tool.pytest.ini_options]
-addopts = ["-v", "--tb=short", "--strict-config", "--cov=openrot", "-m", "not integration"]
-markers = [
-    "integration: full-loop tests hitting real network sources and sing-box (slow; excluded from the default run)",
-]
+addopts = ["-v", "--tb=short", "--strict-config", "--cov=openrot"]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
