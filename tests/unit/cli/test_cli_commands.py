@@ -198,3 +198,51 @@ def test_warp_status_json(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data == {"status": "connected", "ip": "9.9.9.9"}
+
+
+def test_self_update_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openrot.self_update import UpdateResult
+
+    monkeypatch.setattr(
+        cli.self_update,
+        "check_for_update",
+        lambda: UpdateResult("0.3.0", "0.3.0", False, "already up to date (0.3.0)"),
+    )
+    result = runner.invoke(cli.app, ["self-update", "--yes"])
+    assert result.exit_code == 0
+    assert "already up to date" in result.output
+
+
+def test_self_update_check_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openrot.self_update import UpdateResult
+
+    monkeypatch.setattr(
+        cli.self_update,
+        "check_for_update",
+        lambda: UpdateResult("0.3.0", "0.3.0", False, "failed to check: timeout"),
+    )
+    result = runner.invoke(cli.app, ["self-update", "--yes"])
+    assert result.exit_code == 0
+    assert "failed to check" in result.output
+
+
+def test_self_update_installs_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openrot.self_update import UpdateResult
+
+    monkeypatch.setattr(
+        cli.self_update,
+        "check_for_update",
+        lambda: UpdateResult(
+            "0.3.0", "0.4.0", True, "update available: 0.3.0 -> 0.4.0"
+        ),
+    )
+    monkeypatch.setattr(
+        cli.self_update,
+        "perform_update",
+        lambda progress_fn: UpdateResult(
+            "0.3.0", "0.4.0", True, "updated 0.3.0 -> 0.4.0"
+        ),
+    )
+    result = runner.invoke(cli.app, ["self-update", "--yes"])
+    assert result.exit_code == 0
+    assert "updated 0.3.0 -> 0.4.0" in result.output

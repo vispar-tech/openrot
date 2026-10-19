@@ -367,8 +367,9 @@ def self_update_cmd(
     """Update the openrot binary to the latest release."""
     with activity("checking for updates..."):
         result = self_update.check_for_update()
-    if result.updated or result.current == result.latest:
-        console.print(f"[green]{result.message}[/green]")
+    if not result.updated:
+        style = "red" if result.message.startswith("failed") else "green"
+        console.print(f"[{style}]{result.message}[/{style}]")
         raise typer.Exit
 
     console.print(f"[yellow]{result.message}[/yellow]")
