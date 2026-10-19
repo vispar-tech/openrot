@@ -112,6 +112,26 @@ def test_env_bad_bridge_min_interval_raises_config_error(
         cfg.load_config(path)
 
 
+def test_env_overrides_bridge_direct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_DIRECT", "1")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    loaded = cfg.load_config(path)
+    assert loaded.bridge_direct is True
+
+
+def test_env_bad_bridge_direct_raises_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROT_BRIDGE_DIRECT", "maybe")
+    path = tmp_path / "config.yaml"
+    cfg.save_config(cfg.Config(), path)
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(path)
+
+
 def test_config_bridge_defaults() -> None:
     c = Config()
     assert c.bridge_port == 7891
@@ -120,6 +140,7 @@ def test_config_bridge_defaults() -> None:
     assert c.bridge_retry_attempts == 1
     assert c.bridge_max_concurrent == 3
     assert c.bridge_min_interval == 0.5
+    assert c.bridge_direct is False
 
 
 def test_save_cleans_up_temp_file_on_failure(

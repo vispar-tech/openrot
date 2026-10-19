@@ -162,6 +162,15 @@ loopback-прокси, совместимое с OpenAI (`baseURL`), котор�
 входящего запроса, например `/v1/chat/completions`, добавляется к этой базе),
 либо env-переопределения `OPENROT_BRIDGE_PORT` и `OPENROT_UPSTREAM`.
 
+### Прямой режим (без WARP)
+
+`bridge_direct: true` (или `OPENROT_BRIDGE_DIRECT=1`) превращает bridge в
+обычный pass-through: WARP не запускается, запросы уходят на апстрим с
+собственного адреса хоста, а всё движение по-прежнему видно в логах. Режим
+полезен, когда нужно только наблюдать трафик opencode — ротация IP и
+429-саморотация недоступны (usage-limit `429` обрабатывается как обычный rate
+limit: ждём `Retry-After` и ретраим).
+
 ### Сессионные заголовки бесплатного тира
 
 Bridge нормализует каждый исходящий запрос в ту форму, которую принимает
@@ -215,6 +224,7 @@ bridge_retry_statuses: [429]   # статусы апстрима, вызываю
 bridge_retry_attempts: 1       # максимум повторов на запрос
 bridge_max_concurrent: 3       # максимум параллельных запросов к апстриму
 bridge_min_interval: 0.5       # минимум секунд между стартами запросов к апстриму
+bridge_direct: false           # true = pass-through без WARP (только логирование)
 ```
 
 ### Переопределения через переменные окружения
@@ -230,6 +240,7 @@ bridge_min_interval: 0.5       # минимум секунд между стар
 | `OPENROT_BRIDGE_RETRY_ATTEMPTS` | → `bridge_retry_attempts` |
 | `OPENROT_BRIDGE_MAX_CONCURRENT` | → `bridge_max_concurrent` |
 | `OPENROT_BRIDGE_MIN_INTERVAL` | → `bridge_min_interval` |
+| `OPENROT_BRIDGE_DIRECT` | → `bridge_direct` (boolean) |
 | `OPENROT_WARP` | имя/путь бинарника warp-cli (по умолчанию `warp-cli`) |
 | `OPENROT_WARP_HOST` / `OPENROT_WARP_PORT` | SOCKS5-адрес WARP (по умолчанию `127.0.0.1:40000`) |
 | `OPENROT_WARP_ROTATE_DELAY` / `OPENROT_WARP_ROTATE_ATTEMPTS` | темп ротации: секунды между попытками / максимум попыток (по умолчанию `10` / `5`) |

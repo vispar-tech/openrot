@@ -59,6 +59,25 @@ def test_client_proxies_through_warp_socks5(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["timeout"] == 300
 
 
+def test_client_direct_mode_skips_warp_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In direct mode no proxy is used and WARP is never consulted."""
+    captured: dict[str, object] = {}
+
+    def fake_make_client(**kw: object) -> None:
+        captured.update(kw)
+
+    def fail_proxy_address() -> tuple[str, int]:
+        raise AssertionError("warp.proxy_address must not be called in direct mode")
+
+    monkeypatch.setattr(bridge.warp, "proxy_address", fail_proxy_address)
+    monkeypatch.setattr(bridge, "make_client", fake_make_client)
+
+    bridge._client(_cfg(bridge_direct=True))
+
+    assert captured["proxy"] is None
+    assert captured["timeout"] == 300
+
+
 def _usage_limit_body() -> bytes:
     """Return a JSON body that signals FreeUsageLimitError."""
     return b'{"type":"error","error":{"type":"FreeUsageLimitError","message":"quota"}}'
@@ -445,6 +464,39 @@ def test_forward_no_rotate_when_disabled(
     finally:
         client.close()
     assert rotated == []
+
+
+def test_forward_direct_mode_treats_usage_limit_as_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct mode has no WARP to rotate: usage-limit 429 waits and retries."""
+    queue: list[httpx.Response] = [
+        httpx.Response(429, content=_usage_limit_body()),
+        httpx.Response(200, content=b"recovered"),
+    ]
+    fake = _FakeClient(queue)
+
+    def make_client(cfg: Config) -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr(bridge, "_get_client", make_client)
+    bridge._shared_client = None
+
+    def fail_rotate() -> bool:
+        raise AssertionError("cascade.rotate must not be called in direct mode")
+
+    monkeypatch.setattr(bridge.cascade, "rotate", fail_rotate)
+    logged: list[str] = []
+    monkeypatch.setattr(bridge, "_log", lambda msg: logged.append(msg))
+
+    resp, client = bridge.forward(_cfg(bridge_direct=True), _req())
+    try:
+        assert resp.status_code == 200
+        assert resp.content == b"recovered"
+    finally:
+        client.close()
+    assert any("rate limited" in msg for msg in logged)
+    assert not any("rotation" in msg for msg in logged)
 
 
 def test_forward_429_after_retry_is_returned(

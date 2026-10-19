@@ -143,6 +143,7 @@ def _apply_env_overrides(cfg: Config) -> Config:
     _env_int("OPENROT_BRIDGE_RETRY_ATTEMPTS", "bridge_retry_attempts", cfg)
     _env_int("OPENROT_BRIDGE_MAX_CONCURRENT", "bridge_max_concurrent", cfg)
     _env_float("OPENROT_BRIDGE_MIN_INTERVAL", "bridge_min_interval", cfg)
+    _env_bool("OPENROT_BRIDGE_DIRECT", "bridge_direct", cfg)
     return cfg
 
 

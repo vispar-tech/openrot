@@ -161,6 +161,15 @@ The upstream base and port are configurable — see `bridge_port` (default
 request path, e.g. `/v1/chat/completions`, is appended to it), or the env
 overrides `OPENROT_BRIDGE_PORT` and `OPENROT_UPSTREAM`.
 
+### Direct mode (no WARP)
+
+Set `bridge_direct: true` (or `OPENROT_BRIDGE_DIRECT=1`) to run the bridge as a
+plain pass-through: WARP is not started, requests go upstream from the host's
+own address, and every request/response is still logged. Useful when you only
+want to observe opencode's traffic — IP rotation and 429 self-rotation are
+unavailable in this mode (a usage-limit `429` is treated like any other rate
+limit: wait out `Retry-After` and retry).
+
 ### Free-tier session headers
 
 The bridge normalizes every upstream request to the shape the free gateway
@@ -212,6 +221,7 @@ bridge_retry_statuses: [429]   # upstream statuses that trigger a retry
 bridge_retry_attempts: 1       # max retries per request
 bridge_max_concurrent: 3       # max parallel upstream requests
 bridge_min_interval: 0.5       # min seconds between upstream request starts
+bridge_direct: false           # true = pass-through without WARP (logging only)
 ```
 
 ### Environment overrides
@@ -227,6 +237,7 @@ bridge_min_interval: 0.5       # min seconds between upstream request starts
 | `OPENROT_BRIDGE_RETRY_ATTEMPTS` | → `bridge_retry_attempts` |
 | `OPENROT_BRIDGE_MAX_CONCURRENT` | → `bridge_max_concurrent` |
 | `OPENROT_BRIDGE_MIN_INTERVAL` | → `bridge_min_interval` |
+| `OPENROT_BRIDGE_DIRECT` | → `bridge_direct` (boolean) |
 | `OPENROT_WARP` | warp-cli binary name/path (default `warp-cli`) |
 | `OPENROT_WARP_HOST` / `OPENROT_WARP_PORT` | WARP SOCKS5 address (default `127.0.0.1:40000`) |
 | `OPENROT_WARP_ROTATE_DELAY` / `OPENROT_WARP_ROTATE_ATTEMPTS` | rotate pacing: seconds between attempts / max attempts (defaults `10` / `5`) |

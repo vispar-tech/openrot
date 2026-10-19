@@ -222,6 +222,14 @@ def upstream_url(cfg_obj: Config, path: str) -> str:
 
 
 def _client(cfg_obj: Config) -> httpx.Client:
+    """Return the upstream client: direct, or through the WARP SOCKS5 proxy.
+
+    In direct mode (``bridge_direct``) no proxy is used — requests go out from
+    the host's own address, which is enough when the goal is only to observe
+    traffic in the logs.
+    """
+    if cfg_obj.bridge_direct:
+        return make_client(proxy=None, timeout=300)
     w_host, w_port = warp.proxy_address()
     proxy_url = f"socks5://{w_host}:{w_port}"
     return make_client(proxy=proxy_url, timeout=300)
@@ -605,6 +613,15 @@ def _rotate_and_retry(
             break
 
         if resp.status_code == 429 and _is_usage_limit_error(resp):
+            if cfg_obj.bridge_direct:
+                # Rotation is WARP-only; in direct mode a usage-limit 429 is
+                # just another rate limit — wait out the delay and retry.
+                delay = _retry_delay(resp)
+                _log(f"[bridge] rate limited, waiting {delay:.1f}s")
+                resp.close()
+                time.sleep(delay)
+                resp = _fetch(client, cfg_obj, request)
+                continue
             rotated = False
             with contextlib.suppress(SystemExit):
                 rotated = cascade.rotate()
@@ -759,6 +776,10 @@ def serve() -> None:
     Standalone bridge for testing (``openrot start bridge``): start it, then
     point any OpenAI-compatible client at the loopback URL and watch it route
     through WARP with 429 self-rotation. Ctrl-C stops it.
+
+    With ``bridge_direct`` set, WARP is skipped entirely: the bridge listens,
+    logs every request/response, and forwards straight to the upstream from
+    the host's own address.
     """
     cfg_obj = cfg.load_config()
     host = cfg.listen_address()
@@ -768,16 +789,22 @@ def serve() -> None:
             "not starting[/red]"
         )
         raise SystemExit(1)
-    if not (
-        cfg_obj.active_level != ActiveLevel.NONE and cascade.level_serving(cfg_obj)
-    ):
-        console.print("no active level, connecting warp...")
-        if not cascade.start():
-            console.print(
-                "[yellow]warp unavailable; the health loop will keep retrying[/yellow]"
-            )
-        cfg_obj = cfg.load_config()
-    cascade.background()
+    if cfg_obj.bridge_direct:
+        console.print(
+            "[yellow]direct mode: warp disabled, forwarding without proxy[/yellow]"
+        )
+    else:
+        if not (
+            cfg_obj.active_level != ActiveLevel.NONE and cascade.level_serving(cfg_obj)
+        ):
+            console.print("no active level, connecting warp...")
+            if not cascade.start():
+                console.print(
+                    "[yellow]warp unavailable; the health loop will keep retrying"
+                    "[/yellow]"
+                )
+            cfg_obj = cfg.load_config()
+        cascade.background()
 
     url = base_url(cfg_obj)
     console.print(
