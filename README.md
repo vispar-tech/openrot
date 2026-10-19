@@ -23,7 +23,7 @@ opencode ──HTTP──▶ openrot bridge (127.0.0.1:7891)
                WARP SOCKS5 (127.0.0.1:40000)
                         │
                         ▼
-               bridge_upstream (https://opencode.ai/zen)
+               bridge_upstream (https://opencode.ai/inference)
 ```
 
 ## Why
@@ -157,36 +157,45 @@ request; other configured retry statuses wait out `Retry-After` first. Retries
 are bounded by `bridge_retry_attempts`.
 
 The upstream base and port are configurable — see `bridge_port` (default
-`7891`), `bridge_upstream` (default `https://opencode.ai/zen`; the incoming
+`7891`), `bridge_upstream` (default `https://opencode.ai/inference`; the incoming
 request path, e.g. `/v1/chat/completions`, is appended to it), or the env
 overrides `OPENROT_BRIDGE_PORT` and `OPENROT_UPSTREAM`.
 
 ### Free-tier session headers
 
-opencode's free tier keys on the `X-Opencode-Session` header: a bare request
-that lacks it lands in the anonymous quota and can be rejected with
-`FreeUsageLimitError`. When `bridge_inject_session` is on (the default), the
-bridge adds, on every upstream request that doesn't already carry them:
+The bridge normalizes every upstream request to the shape the free gateway
+accepts (the same rules as the official opencode client):
 
-- `X-Opencode-Session` — `ses_` + 26 digits
-- `X-Opencode-Request` — `msg_` + 24 alnum
-- an opencode `User-Agent` (a non-opencode one is replaced)
-- stub entries in the `tools` array of chat bodies (the free gateway requires
-  at least two)
-
-Values sent by the client are respected (never overwritten). Toggle this off
-with `bridge_inject_session: false` in config or
-`OPENROT_BRIDGE_INJECT_SESSION=0`:
+- the four session headers (`X-Opencode-Session`, `X-Opencode-Session-Id`,
+  `X-Session-Affinity`, `X-Session-Id`) are set to one canonical `ses_` id —
+  a client-provided canonical session is kept for prompt-cache affinity, any
+  other value is deterministically re-encoded into a canonical one;
+- `X-Opencode-Project` (40 hex) and `X-Opencode-Client: cli` are added when
+  missing;
+- the `User-Agent` is set to an opencode one (a non-opencode one is replaced);
+- the legacy `X-Opencode-Request` header is stripped, never injected;
+- missing `Authorization` falls back to `Bearer public`;
+- in chat bodies: streaming and `stream_options.include_usage` are forced on,
+  recognised tool names are replaced with their genuine definitions, and the
+  core tools (`shell`, `edit`, `glob`, `grep`, `read`) are added if missing;
+  unknown client tools are passed through untouched;
+- opencode's title-generation system prompt — sent at the start of every new
+  chat — is swapped for a reworded equivalent (`core/data/title_system.txt`).
+  The gateway fingerprints the original by its `task`/`rules`/`examples`
+  markers together (no single line trips it) and answers `403 FreeTierError`,
+  so without the swap the first request of every new chat fails while the real
+  one immediately after it succeeds. The replacement is idempotent and leaves
+  unrelated system prompts untouched.
 
 ```bash
-# via the bridge: headers are added automatically
+# via the bridge: headers are normalized automatically
 curl -s http://127.0.0.1:7891/v1/chat/completions \
-  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+  -H 'Content-Type: application/json' -d '{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}'
 
-# hitting the upstream directly: add the header yourself
-curl -s https://opencode.ai/zen/v1/chat/completions \
-  -H 'X-Opencode-Session: ses_<26 digits>' \
-  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+# hitting the upstream directly
+curl -s https://opencode.ai/inference/v1/chat/completions \
+  -H 'X-Opencode-Session: ses_<canonical>' \
+  -H 'Content-Type: application/json' -d '{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Config
@@ -198,12 +207,11 @@ Overridden by `OPENROT_DIR` (base dir) and `OPENROT_CONFIG` (full config path).
 health_interval: 30      # seconds between WARP health checks (health loop)
 active_level: none       # none | warp (written by start/stop)
 bridge_port: 7891        # loopback port for the opencode bridge
-bridge_upstream: "https://opencode.ai/zen"  # request path is appended to this base
+bridge_upstream: "https://opencode.ai/inference"  # request path is appended to this base
 bridge_retry_statuses: [429]   # upstream statuses that trigger a retry
 bridge_retry_attempts: 1       # max retries per request
 bridge_max_concurrent: 3       # max parallel upstream requests
 bridge_min_interval: 0.5       # min seconds between upstream request starts
-bridge_inject_session: true    # inject free-tier session headers / UA / tools
 ```
 
 ### Environment overrides
@@ -219,14 +227,14 @@ bridge_inject_session: true    # inject free-tier session headers / UA / tools
 | `OPENROT_BRIDGE_RETRY_ATTEMPTS` | → `bridge_retry_attempts` |
 | `OPENROT_BRIDGE_MAX_CONCURRENT` | → `bridge_max_concurrent` |
 | `OPENROT_BRIDGE_MIN_INTERVAL` | → `bridge_min_interval` |
-| `OPENROT_BRIDGE_INJECT_SESSION` | → `bridge_inject_session` (bool) |
 | `OPENROT_WARP` | warp-cli binary name/path (default `warp-cli`) |
 | `OPENROT_WARP_HOST` / `OPENROT_WARP_PORT` | WARP SOCKS5 address (default `127.0.0.1:40000`) |
 | `OPENROT_WARP_ROTATE_DELAY` / `OPENROT_WARP_ROTATE_ATTEMPTS` | rotate pacing: seconds between attempts / max attempts (defaults `10` / `5`) |
-| `OPENROT_DEBUG_REQ` | verbose per-request bridge logging (secrets in auth headers are masked) |
+| `OPENROT_DEBUG_REQ` | verbose per-request bridge logging (secrets in auth headers are masked) plus raw incoming/outgoing body dumps to `debug/` |
 
 Runtime paths, all under the base directory: `config.yaml`,
-`openrot.log`, `openrot-bridge.daemon.pid`.
+`openrot.log`, `openrot-bridge.daemon.pid`, `debug/` (raw body dumps, written
+only when `OPENROT_DEBUG_REQ=1`).
 
 ## Install (standalone / Docker)
 

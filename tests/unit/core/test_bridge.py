@@ -6,6 +6,7 @@ merged into ``openrot.core.bridge``, and their tests live here too.
 
 import gzip
 import json
+import re
 import socket
 from io import BytesIO
 from pathlib import Path
@@ -77,6 +78,35 @@ def test_is_usage_limit_error() -> None:
     assert not bridge._is_usage_limit_error(httpx.Response(429, content=b"not json"))
 
 
+def test_is_usage_limit_error_reads_streamed_response() -> None:
+    """A streamed (unread) 429 must not raise ResponseNotRead from ``.text``.
+
+    ``_fetch`` sends with ``stream=True``, so the body is unreadable until
+    ``read()`` — this previously escaped into the handler and cost the client
+    a 502 instead of a usage-limit rotation.
+    """
+
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self) -> object:
+            yield _usage_limit_body()
+
+        def close(self) -> None:
+            pass
+
+    resp = httpx.Response(429, stream=Stream())
+    with pytest.raises(httpx.ResponseNotRead):
+        _ = resp.text  # reproduces the original bug when read() is skipped
+
+    resp = httpx.Response(429, stream=Stream())
+    assert bridge._is_usage_limit_error(resp) is True
+    # the buffered body is still available to _respond's iter_bytes()
+    assert b"".join(resp.iter_bytes()) == _usage_limit_body()
+    # non-429 stays untouched so the 200 path keeps streaming
+    untouched = httpx.Response(200, stream=Stream())
+    assert bridge._is_usage_limit_error(untouched) is False
+    assert untouched.is_stream_consumed is False
+
+
 def test_retry_delay_from_header() -> None:
     resp = httpx.Response(429, headers={"Retry-After": "30"})
     assert bridge._retry_delay(resp) == 30.0
@@ -95,27 +125,63 @@ def test_forward_headers_strips_hop_by_hop_and_sets_host() -> None:
     assert out["Authorization"] == "Bearer k"
 
 
-def _alnum_len(value: str, prefix: str) -> int:
-    assert value.startswith(prefix)
-    return len(value) - len(prefix)
-
-
-def test_forward_headers_injects_session_and_request_when_absent() -> None:
+def test_forward_headers_sets_canonical_session_on_all_headers() -> None:
     out = bridge._forward_headers({}, "up.test")
-    assert _alnum_len(out["X-Opencode-Session"], "ses_") == 26
-    assert out["X-Opencode-Session"][len("ses_") :].isdigit()
-    assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
-    assert out["X-Opencode-Request"][len("msg_") :].isalnum()
+    session = out["X-Opencode-Session"]
+    assert session.startswith("ses_")
+    time_part = session[len("ses_") :][:12]
+    assert re.fullmatch(r"[0-9a-f]{12}", time_part)
+    # descending encoding: counter 1 -> low 12 bits fc0-fff
+    assert re.fullmatch(r"[0-9a-f]{9}f[c-f][0-9a-f]", time_part)
+    tail = session[len("ses_") + 12 :]
+    assert len(tail) == 14 and tail.isalnum()
+    for name in ("X-Opencode-Session-Id", "X-Session-Affinity", "X-Session-Id"):
+        assert out[name] == session
+
+
+def test_forward_headers_keeps_canonical_client_session() -> None:
+    canonical = "ses_ec40f42c4ffeAOIUMQQVMQTCUU"
+    out = bridge._forward_headers({"X-Opencode-Session": canonical}, "up.test")
+    assert out["X-Opencode-Session"] == canonical
+    assert out["X-Opencode-Session-Id"] == canonical
+
+
+def test_forward_headers_reencodes_foreign_session_deterministically() -> None:
+    a = bridge._forward_headers({"X-Opencode-Session": "uuid-1234"}, "up.test")
+    b = bridge._forward_headers({"X-Opencode-Session": "uuid-1234"}, "up.test")
+    assert a["X-Opencode-Session"] == b["X-Opencode-Session"]
+    assert a["X-Opencode-Session"].startswith("ses_")
+
+
+def test_forward_headers_drops_legacy_request_header() -> None:
+    out = bridge._forward_headers({"X-Opencode-Request": "msg_abc"}, "up.test")
+    assert "X-Opencode-Request" not in out
+    assert not any(k.lower() == "x-opencode-request" for k in out)
+
+
+def test_forward_headers_sets_project_client_and_auth_when_absent() -> None:
+    out = bridge._forward_headers({}, "up.test")
+    assert re.fullmatch(r"[0-9a-f]{40}", out["X-Opencode-Project"])
+    assert out["X-Opencode-Client"] == "cli"
+    assert out["Authorization"] == "Bearer public"
+    assert out["Accept"] == "application/json, text/event-stream"
+
+
+def test_forward_headers_keeps_existing_project_and_auth() -> None:
+    headers = {"X-Opencode-Project": "global", "Authorization": "Bearer sk-x"}
+    out = bridge._forward_headers(headers, "up.test")
+    assert out["X-Opencode-Project"] == "global"
+    assert out["Authorization"] == "Bearer sk-x"
 
 
 def test_forward_headers_injects_opencode_user_agent_when_absent() -> None:
     out = bridge._forward_headers({}, "up.test")
-    assert out["User-Agent"].startswith("opencode/")
+    assert out["User-Agent"] == bridge._OPENCODE_UA
 
 
 def test_forward_headers_overrides_non_opencode_user_agent() -> None:
     out = bridge._forward_headers({"User-Agent": "curl/8.0"}, "up.test")
-    assert out["User-Agent"].startswith("opencode/")
+    assert out["User-Agent"] == bridge._OPENCODE_UA
     assert sum(k.lower() == "user-agent" for k in out) == 1
 
 
@@ -125,73 +191,144 @@ def test_forward_headers_keeps_opencode_user_agent() -> None:
     assert out["User-Agent"] == ua
 
 
-def test_forward_headers_respects_existing_session_and_request() -> None:
-    headers = {
-        "X-Opencode-Session": "ses_customvalue",
-        "X-Opencode-Request": "msg_customvalue",
+def test_canonical_session_id_reencodes_non_session_seed() -> None:
+    value = bridge._canonical_session_id("some-random-signal")
+    assert re.fullmatch(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}", value)
+
+
+def test_normalize_body_forces_stream_and_usage() -> None:
+    out = json.loads(bridge._normalize_body(b'{"model": "m", "messages": []}'))
+    assert out["stream"] is True
+    assert out["stream_options"]["include_usage"] is True
+
+
+def test_normalize_body_injects_core_tools_when_missing() -> None:
+    body = json.dumps(
+        {
+            "model": "m",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    ).encode()
+    out = json.loads(bridge._normalize_body(body))
+    names = [t["function"]["name"] for t in out["tools"]]
+    assert names == bridge.CORE_TOOL_NAMES
+    assert out["tools"][0]["function"]["description"]  # genuine definition
+
+
+def test_normalize_body_replaces_recognised_stub_with_genuine() -> None:
+    body = json.dumps(
+        {
+            "model": "m",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "description": "read",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        }
+    ).encode()
+    out = json.loads(bridge._normalize_body(body))
+    assert out["tools"][0] == bridge.GENUINE_TOOLS["read"]
+
+
+def _title_body(system: str) -> dict:
+    return {
+        "model": "m",
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "hi"},
+        ],
     }
-    out = bridge._forward_headers(headers, "up.test")
-    assert out["X-Opencode-Session"] == "ses_customvalue"
-    assert out["X-Opencode-Request"] == "msg_customvalue"
 
 
-def test_forward_headers_respects_existing_session_only() -> None:
-    out = bridge._forward_headers({"X-Opencode-Session": "ses_custom"}, "up.test")
-    assert out["X-Opencode-Session"] == "ses_custom"
-    assert _alnum_len(out["X-Opencode-Request"], "msg_") == 24
-
-
-def test_forward_headers_no_injection_when_disabled() -> None:
-    out = bridge._forward_headers({}, "up.test", inject=False)
-    assert "X-Opencode-Session" not in out
-    assert "X-Opencode-Request" not in out
-    assert "User-Agent" not in out
-
-
-def test_random_id_format_and_uniqueness() -> None:
-    a = bridge._random_id("msg_", 24)
-    b = bridge._random_id("msg_", 24)
-    assert _alnum_len(a, "msg_") == 24
-    assert a != b
-
-
-def test_random_session_id_format() -> None:
-    a = bridge._random_session_id()
-    b = bridge._random_session_id()
-    assert _alnum_len(a, "ses_") == 26
-    assert a[len("ses_") :].isdigit()
-    assert a != b
-
-
-def test_ensure_tools_injects_stubs_when_missing() -> None:
-    body = b'{"model": "big-pickle", "messages": []}'
-    out = json.loads(bridge._ensure_tools(body))
-    assert len(out["tools"]) == 2
-    assert out["tools"][0]["type"] == "function"
-
-
-def test_ensure_tools_appends_stubs_when_single_tool() -> None:
-    body = b'{"model": "big-pickle", "tools": [{"type": "function"}]}'
-    out = json.loads(bridge._ensure_tools(body))
-    assert len(out["tools"]) == 3
-    assert out["tools"][0] == {"type": "function"}
-    assert out["tools"][1:] == bridge._STUB_TOOLS
-
-
-def test_ensure_tools_appends_stubs_to_two_or_more_tools() -> None:
-    body = (
-        b'{"model": "big-pickle", '
-        b'"tools": [{"type": "function"}, {"type": "function"}]}'
+def test_normalize_body_rewrites_opencode_title_prompt() -> None:
+    original = (
+        "You are a title generator. You output ONLY a thread title. "
+        "Nothing else.\n\n<task>\nGenerate a brief title...\n</task>\n\n"
+        "<rules>\n- you MUST use the same language...\n</rules>\n\n"
+        '<examples>\n"debug 500 errors" -> Debugging 500 errors\n</examples>'
     )
-    out = json.loads(bridge._ensure_tools(body))
-    assert len(out["tools"]) == 4
-    assert out["tools"][:2] == [{"type": "function"}, {"type": "function"}]
-    assert out["tools"][2:] == bridge._STUB_TOOLS
+    out = json.loads(bridge._normalize_body(json.dumps(_title_body(original)).encode()))
+    system = out["messages"][0]["content"]
+    assert system == bridge.TITLE_SYSTEM_PROMPT
+    assert "title generator" not in system[:80].lower()
 
 
-def test_ensure_tools_leaves_invalid_and_empty_bodies() -> None:
-    assert bridge._ensure_tools(b"") == b""
-    assert bridge._ensure_tools(b"not json") == b"not json"
+def test_normalize_body_leaves_unrelated_system_prompt() -> None:
+    system = "You are opencode, an interactive CLI tool."
+    out = json.loads(bridge._normalize_body(json.dumps(_title_body(system)).encode()))
+    assert out["messages"][0]["content"] == system
+
+
+def test_normalize_body_title_rewrite_is_idempotent() -> None:
+    original = "You are a title generator. You output ONLY a thread title."
+    once = bridge._normalize_body(json.dumps(_title_body(original)).encode())
+    twice = bridge._normalize_body(once)
+    assert once == twice
+
+
+def test_normalize_title_prompt_ignores_non_string_content() -> None:
+    data = {
+        "messages": [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "title generator"}],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    }
+    assert bridge._normalize_title_prompt(data) is False
+
+
+def test_normalize_body_keeps_unknown_tools_and_appends_missing_core() -> None:
+    body = json.dumps(
+        {
+            "model": "m",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "my_custom_tool",
+                        "description": "d",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        }
+    ).encode()
+    out = json.loads(bridge._normalize_body(body))
+    names = [t["function"]["name"] for t in out["tools"]]
+    assert names[0] == "my_custom_tool"
+    assert out["tools"][0]["function"]["description"] == "d"
+    assert set(bridge.CORE_TOOL_NAMES) <= set(names)
+
+
+def test_normalize_body_returns_compliant_body_byte_identical() -> None:
+    body = json.dumps(
+        {
+            "model": "m",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "tools": [bridge.GENUINE_TOOLS[n] for n in bridge.CORE_TOOL_NAMES],
+        }
+    ).encode()
+    assert bridge._normalize_body(body) == body
+
+
+def test_normalize_body_leaves_invalid_and_empty_bodies() -> None:
+    assert bridge._normalize_body(b"") == b""
+    assert bridge._normalize_body(b"not json") == b"not json"
 
 
 def test_forward_returns_upstream_response(
@@ -895,6 +1032,54 @@ def test_respond_survives_broken_pipe() -> None:
     bridge._respond(handler, resp)
 
 
+def test_log_error_body_skips_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple] = []
+    monkeypatch.setattr(bridge.events, "warning", lambda *a: logged.append(a))
+    bridge._log_error_body(200, b"ok")
+    assert logged == []
+
+
+def test_log_error_body_logs_full_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple] = []
+    monkeypatch.setattr(bridge.events, "warning", lambda *a: logged.append(a))
+    bridge._log_error_body(429, b'{"error":{"type":"FreeUsageLimitError"}}')
+    assert logged == [
+        (
+            "[bridge] status=%s body: %s",
+            429,
+            '{"error":{"type":"FreeUsageLimitError"}}',
+        )
+    ]
+
+
+def test_respond_logs_full_body_on_non_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple] = []
+    monkeypatch.setattr(bridge.events, "warning", lambda *a: logged.append(a))
+    handler = SimpleNamespace(
+        send_response=lambda code: None,
+        send_header=lambda *a: None,
+        end_headers=lambda: None,
+        wfile=BytesIO(),
+    )
+    resp = httpx.Response(429, content=b'{"error":"quota"}')
+    bridge._respond(handler, resp)
+    assert logged == [("[bridge] status=%s body: %s", 429, '{"error":"quota"}')]
+
+
+def test_respond_does_not_log_body_on_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple] = []
+    monkeypatch.setattr(bridge.events, "warning", lambda *a: logged.append(a))
+    handler = SimpleNamespace(
+        send_response=lambda code: None,
+        send_header=lambda *a: None,
+        end_headers=lambda: None,
+        wfile=BytesIO(),
+    )
+    resp = httpx.Response(200, content=b"ok")
+    bridge._respond(handler, resp)
+    assert logged == []
+
+
 def test_handler_returns_502_on_upstream_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -920,6 +1105,30 @@ def test_handler_returns_502_on_upstream_error(
     handler._handle("POST")
     assert status == [502]
     assert b'"upstream"' in written[0]
+
+
+def test_fail_upstream_logs_full_502_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple] = []
+    monkeypatch.setattr(bridge.events, "warning", lambda *a: logged.append(a))
+    monkeypatch.setattr(
+        bridge.BridgeHandler, "_log_request_console", lambda self, method: None
+    )
+
+    handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+    handler.wfile = SimpleNamespace(write=lambda b: None)
+    handler.send_response = lambda code: None
+    handler.send_header = lambda k, v: None
+    handler.end_headers = lambda: None
+
+    handler._fail_upstream("POST", 0.0, httpx.HTTPError("up boom"))
+
+    assert logged == [
+        (
+            "[bridge] status=%s body: %s",
+            502,
+            '{"error": {"message": "up boom", "type": "upstream"}}',
+        )
+    ]
 
 
 def test_handler_logs_request_elapsed_and_model(

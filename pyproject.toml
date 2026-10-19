@@ -22,6 +22,7 @@ openrot = "openrot.cli:app"
 
 [tool.poetry]
 packages = [{ include = "openrot" }]
+include = ["openrot/core/data/*.json"]
 version = "0.0.0"
 
 [tool.poetry.requires-plugins]

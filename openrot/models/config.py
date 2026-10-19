@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .enums import ActiveLevel
 
-DEFAULT_BRIDGE_UPSTREAM = "https://opencode.ai/zen"
+DEFAULT_BRIDGE_UPSTREAM = "https://opencode.ai/inference"
 
 
 class Config(BaseModel):
@@ -18,4 +18,3 @@ class Config(BaseModel):
     bridge_retry_attempts: int = Field(default=1, ge=0, le=10)
     bridge_max_concurrent: int = Field(default=3, ge=1, le=20)
     bridge_min_interval: float = Field(default=0.5, ge=0.0)
-    bridge_inject_session: bool = True

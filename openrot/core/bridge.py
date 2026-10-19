@@ -18,17 +18,18 @@ tunnel — so the 429 is visible here without any MITM.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import re
 import secrets
 import socket
-import string
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
 from urllib.parse import urljoin
 
 import httpx
@@ -39,6 +40,11 @@ from openrot import signals
 from openrot.config import ActiveLevel, Config
 from openrot.core import cascade, daemon
 from openrot.core.http import make_client, port_in_use
+from openrot.core.opencode_tools import (
+    CORE_TOOL_NAMES,
+    GENUINE_TOOLS,
+    TITLE_SYSTEM_PROMPT,
+)
 from openrot.log import get_logger as _get_logger
 from openrot.models.config import DEFAULT_BRIDGE_UPSTREAM
 from openrot.providers import warp
@@ -58,49 +64,43 @@ class _Request:
 _HOP_BY_HOP = {"connection", "host", "proxy-connection"}
 
 # Request leg: transport framing is re-created from the raw body by httpx.
-# ``x-opencode-client`` is an opencode client marker the gateway does not
-# inspect, so it is dropped rather than forwarded.
+# ``x-opencode-request`` is rejected by the gateway with a 403 (the legacy
+# header), so it is dropped rather than forwarded.
 _REQUEST_STRIP = _HOP_BY_HOP | {
     "transfer-encoding",
     "content-length",
+    "x-opencode-request",
 }
 
 # Response leg: framing is re-created below (content-length or chunked).
 _RESPONSE_STRIP = _HOP_BY_HOP | {"transfer-encoding"}
 
-_ALNUM = string.ascii_letters + string.digits
+# User-Agent shape the free tier gateway expects: opencode/<channel>/<version>/<name>.
+_OPENCODE_UA = "opencode/latest/2.0.29/cli"
 
-# User-Agent the free tier gateway expects; injected when the client sends
-# none or a non-opencode one (curl, python-requests, ...).
-_OPENCODE_UA = "opencode/1.18.30 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+# Identity defaults applied when the anonymous free tier client sends none.
+_ANONYMOUS_AUTH = "Bearer public"
+_CLIENT_NAME = "cli"
+_ACCEPT = "application/json, text/event-stream"
 
-# Stub tools injected into bodies that carry no (or too few) tools: the free
-# tier gateway requires a ``tools`` array with at least two elements and
-# validates the tool names against real opencode tools (bash, read, ...).
-_STUB_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "run",
-            "parameters": {
-                "type": "object",
-                "properties": {"c": {"type": "string"}},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read",
-            "description": "read",
-            "parameters": {
-                "type": "object",
-                "properties": {"p": {"type": "string"}},
-            },
-        },
-    },
-]
+# Salts/mask for the deterministic session and project id derivation.
+_SESSION_SALT = b"ses\x00"
+_PROJECT_ID_SALT = b"opencode-project\x00openrot"
+_SESSION_TIME_MASK = 0xFFFFFFFFFFFF
+
+# Session shape: "ses_" + 12 lowercase hex + 14 base62. The time part must be
+# the descending-encoded timestamp (~(ts_ms<<12|counter), low 12 bits fc0-fff).
+_SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$")
+_CANONICAL_TIME_PART_RE = re.compile(r"^[0-9a-f]{9}f[c-f][0-9a-f]$")
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+# All four session headers must carry the same canonical id upstream.
+_SESSION_HEADERS = (
+    "X-Opencode-Session",
+    "X-Opencode-Session-Id",
+    "X-Session-Affinity",
+    "X-Session-Id",
+)
 
 _RETRY_DELAY_DEFAULT = 5.0
 
@@ -120,6 +120,19 @@ _pacing_lock = threading.Lock()
 def _log(msg: str) -> None:
     """Log a message through the events logger with consistent formatting."""
     events.info(msg)
+
+
+def _log_error_body(status: int, body: bytes) -> None:
+    """Log the full response body for any non-200 status.
+
+    Error bodies carry the upstream's reason (quota, validation, ...), so they
+    are logged verbatim instead of being summarized like the request line.
+    """
+    if status == 200:
+        return
+    events.warning(
+        "[bridge] status=%s body: %s", status, body.decode("utf-8", "replace")
+    )
 
 
 def _mask_secret(value: str) -> str:
@@ -151,14 +164,9 @@ def _debug_request(
     messages = messages if isinstance(messages, list) else []
     tool_names = []
     for tool in data.get("tools", []) or []:
-        if isinstance(tool, dict):
-            fn = tool.get("function", {})
-            fn_name: str | None = None
-            if isinstance(fn, dict):
-                tool_name = fn.get("name")
-                fn_name = str(tool_name) if tool_name is not None else None
-            if fn_name:
-                tool_names.append(fn_name)
+        tool_name = _chat_tool_name(tool)
+        if tool_name is not None:
+            tool_names.append(tool_name)
     messages_chars = sum(
         len(m.get("content", "")) if isinstance(m, dict) else 0 for m in messages
     )
@@ -175,10 +183,31 @@ def _debug_request(
     )
 
 
+def _debug_dump(kind: str, body: bytes) -> None:
+    """Persist a raw request body to ``<config dir>/debug`` for offline diffing.
+
+    Opt-in via ``OPENROT_DEBUG_REQ=1``; the summary log above shows names only,
+    which is not enough to reproduce an upstream 403.
+    """
+    if not os.environ.get("OPENROT_DEBUG_REQ"):
+        return
+    try:
+        dump_dir = cfg.LOG_PATH.parent / "debug"
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{kind}-{secrets.token_hex(3)}.json"
+        (dump_dir / name).write_bytes(body)
+    except OSError as exc:
+        events.warning("[bridge][debug] dump failed: %s", exc)
+
+
+def _error_payload(message: str) -> bytes:
+    """Build the JSON body for a bridge-generated upstream error."""
+    return json.dumps({"error": {"message": message, "type": "upstream"}}).encode()
+
+
 def _send_502(handler: BaseHTTPRequestHandler, message: str) -> None:
     """Write a JSON 502 response to the connected client."""
-    msg = {"error": {"message": message, "type": "upstream"}}
-    payload = json.dumps(msg).encode()
+    payload = _error_payload(message)
     handler.send_response(502)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(payload)))
@@ -198,74 +227,251 @@ def _client(cfg_obj: Config) -> httpx.Client:
     return make_client(proxy=proxy_url, timeout=300)
 
 
-def _random_id(prefix: str, length: int) -> str:
-    """Return a random alnum identifier (``prefix`` + ``length`` chars).
+def _client_project_id() -> str:
+    """Return the bare 40-hex project header value the gateway expects."""
+    return hashlib.sha256(_PROJECT_ID_SALT).hexdigest()[:40]
 
-    The request id ``X-Opencode-Request`` is ``msg_``+24 alnum. The server does
-    not validate uniqueness or signature, so a fresh random id per request is
-    enough.
+
+def _canonical_session_id(raw_session: str) -> str:
+    """Return a session id in the descending layout the free tier accepts.
+
+    A raw session that already is an official ``ses_`` session with a
+    descending time part is passed through unchanged (prompt-cache affinity).
+    Anything else is deterministically re-encoded: sha256 -> 48-bit inverted
+    timestamp with counter 1 (low 12 hex digits ``ffe``) + 14 base62 chars.
     """
-    return prefix + "".join(secrets.choice(_ALNUM) for _ in range(length))
+    if _SESSION_ID_RE.match(raw_session) and _CANONICAL_TIME_PART_RE.match(
+        raw_session[4:16]
+    ):
+        return raw_session
+    digest = hashlib.sha256(_SESSION_SALT + raw_session.encode()).digest()
+    # 36-bit timestamp fragment from 5 bytes, shifted into a 48-bit word:
+    # digest[0..3] supply 32 bits and only the top nibble of digest[4] (>> 4)
+    # supplies the last 4 — the low nibble is dropped so the fragment stays
+    # exactly 36 bits, letting the << 12 reserve the low 12 bits for the
+    # counter. digest[5] is skipped so the time part and the base62 tail come
+    # from disjoint regions: the tail takes bytes 6..16 (80 bits), which always
+    # fit into the 14 base62 chars (62^14 > 2^80) with no truncation.
+    # `|= 1` fixes the low 12 counter bits to 1, so the inverted time part
+    # always ends in the fc0-fff range the layout requires.
+    current = (
+        digest[0] << 28
+        | digest[1] << 20
+        | digest[2] << 12
+        | digest[3] << 4
+        | digest[4] >> 4
+    ) << 12
+    current |= 1
+    inverted = (~current) & _SESSION_TIME_MASK
+    time_part = f"{inverted:012x}"
+    n = int.from_bytes(digest[6:16], "big")
+    out: list[str] = []
+    for _ in range(14):
+        n, rem = divmod(n, 62)
+        out.append(_BASE62[rem])
+    return "ses_" + time_part + "".join(reversed(out))
 
 
-def _random_session_id() -> str:
-    r"""Return a session id the free tier gateway accepts.
+def _client_session_seed(headers: dict[str, str]) -> str:
+    """Return the first session-identifying header value the client sent.
 
-    The gateway validates ``X-Opencode-Session`` by format only: ``ses_``
-    followed by exactly 26 digits (``^ses_\\d{26}$``). Anything else — 22 alnum,
-    shorter/longer digit runs, mixed alnum — is rejected with FreeTierError.
+    When the client sends no session header the fallback is random per
+    request, so each request gets a fresh canonical session (no prompt-cache
+    affinity for bare requests).
     """
-    return "ses_" + "".join(secrets.choice("0123456789") for _ in range(26))
+    lower = {k.lower(): v for k, v in headers.items()}
+    seed = next(
+        (
+            lower[name]
+            for name in (
+                "x-opencode-session",
+                "x-opencode-session-id",
+                "x-session-affinity",
+                "x-session-id",
+                "conversation-id",
+            )
+            if lower.get(name)
+        ),
+        None,
+    )
+    return seed if seed is not None else secrets.token_hex(8)
 
 
-def _ensure_tools(body: bytes) -> bytes:
-    """Append the stub tools to the request's tools array.
+def _force_streaming(data: dict[str, object]) -> bool:
+    """Force ``stream`` and ``stream_options.include_usage`` on. True if changed."""
+    changed = False
+    if data.get("stream") is not True:
+        data["stream"] = True
+        changed = True
+    options = data.get("stream_options")
+    if not isinstance(options, dict):
+        data["stream_options"] = {"include_usage": True}
+        changed = True
+    elif options.get("include_usage") is not True:
+        options["include_usage"] = True
+        changed = True
+    return changed
 
-    The free tier gateway requires a ``tools`` array with at least two
-    elements, so the two stub tools are appended to every JSON body —
-    unless a tool with the same name is already present.
+
+def _chat_tool_name(item: object) -> str | None:
+    """Return the function name of a Chat tools-array item, if any."""
+    if not isinstance(item, dict):
+        return None
+    fn = item.get("function")
+    name = fn.get("name") if isinstance(fn, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def _normalize_tools(tools: list[object]) -> tuple[list[object], bool]:
+    """Replace recognised stubs with genuine defs, append missing core tools.
+
+    Unknown tool names are left exactly as the client declared them.
+    """
+    present: set[str] = set()
+    out = list(tools)
+    changed = False
+    for index, item in enumerate(out):
+        name = _chat_tool_name(item)
+        if name is None:
+            continue
+        present.add(name)
+        genuine = GENUINE_TOOLS.get(name)
+        if genuine is not None and item != genuine:
+            out[index] = genuine
+            changed = True
+    missing = [name for name in CORE_TOOL_NAMES if name not in present]
+    if missing:
+        out = out + [GENUINE_TOOLS[name] for name in missing]
+        changed = True
+    return out, changed
+
+
+def _normalize_title_prompt(data: dict[str, object]) -> bool:
+    """Swap opencode's title-generation system prompt for a reworded one.
+
+    opencode fires a title request at the start of every new chat, carrying the
+    exact prompt shipped in its client. The gateway fingerprints that prompt —
+    no single line trips the check, only its ``<task>``/``<rules>``/
+    ``<examples>`` markers together — and answers 403 FreeTierError, so the
+    first request of every new chat fails while the real one right after it
+    succeeds. A reworded equivalent that still produces a good short title is
+    accepted, so it is swapped in; anything else is left untouched.
+    """
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        if "title generator" not in content[:80].lower():
+            continue
+        if content != TITLE_SYSTEM_PROMPT:
+            message["content"] = TITLE_SYSTEM_PROMPT
+            return True
+    return False
+
+
+def _normalize_body(body: bytes) -> bytes:
+    """Normalize a chat body for the free tier: streaming + genuine tools.
+
+    - ``stream`` is forced on and ``stream_options.include_usage`` is set
+      (the SSE path reports usage only with it);
+    - recognised tool names are replaced with their genuine definitions
+      (the gateway rejects stubs that merely reuse a recognised name);
+    - missing core tools (shell/edit/glob/grep/read) are appended;
+    - opencode's title-generation system prompt is swapped for a reworded
+      equivalent (the gateway fingerprints the original and answers 403);
+    - unknown tool names are left exactly as the client declared them.
+
+    Bodies that already satisfy everything are returned byte-identical.
+    When any change is made the body is re-serialized with ``json.dumps``
+    defaults (whitespace normalized, non-ASCII escaped), so byte-identical
+    pass-through is only promised for already-compliant bodies.
     """
     if not body:
         return body
     try:
         data = json.loads(body)
-    except json.JSONDecodeError, AttributeError:
+    except json.JSONDecodeError, AttributeError, ValueError:
         return body
+    if not isinstance(data, dict):
+        return body
+    changed = _force_streaming(data)
+    changed = _normalize_title_prompt(data) or changed
     tools = data.get("tools")
     if not isinstance(tools, list):
         tools = []
-    existing = {
-        tool.get("function", {}).get("name") for tool in tools if isinstance(tool, dict)
-    }
-    data["tools"] = tools + [
-        stub
-        for stub in _STUB_TOOLS
-        if stub.get("function", {}).get("name") not in existing
-    ]
+    data["tools"], tools_changed = _normalize_tools(tools)
+    changed = changed or tools_changed
+    if not changed:
+        return body
     return json.dumps(data).encode()
 
 
-def _forward_headers(
-    headers: dict[str, str], host: str, inject: bool = True
-) -> dict[str, str]:
+def _strip_unforwardable_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Copy headers, dropping unforwardable ones and case-duplicate names.
+
+    ``x-opencode-request`` (legacy) and hop-by-hop/framing headers are
+    stripped; when two incoming names differ only by case, the first
+    occurrence wins and later duplicates are dropped.
+    """
     out: dict[str, str] = {}
+    seen: set[str] = set()
     for key, value in headers.items():
-        if key.lower() in _REQUEST_STRIP:
+        lower = key.lower()
+        if lower in _REQUEST_STRIP or lower in seen:
             continue
+        seen.add(lower)
         out[key] = value
-    if inject:
-        known = {k.lower(): k for k in out}
-        if "x-opencode-session" not in known:
-            out["X-Opencode-Session"] = _random_session_id()
-        if "x-opencode-request" not in known:
-            out["X-Opencode-Request"] = _random_id("msg_", 24)
-        ua_key = known.get("user-agent")
-        if ua_key is not None and not out[ua_key].lower().startswith("opencode/"):
-            del out[ua_key]
-            ua_key = None
-        if ua_key is None:
-            out["User-Agent"] = _OPENCODE_UA
-    if "content-type" not in {k.lower() for k in out}:
+    return out
+
+
+def _apply_session_headers(
+    out: dict[str, str], known: dict[str, str], session: str
+) -> None:
+    """Set the four session headers to one canonical value in ``out``."""
+    for name in _SESSION_HEADERS:
+        existing = known.get(name.lower())
+        if existing is not None:
+            del out[existing]
+        out[name] = session
+
+
+def _ensure_user_agent(out: dict[str, str], known: dict[str, str]) -> None:
+    """Ensure an opencode User-Agent, replacing a non-opencode one."""
+    ua = known.get("user-agent")
+    if ua is None or not out[ua].startswith("opencode/"):
+        if ua is not None:
+            del out[ua]
+        out["User-Agent"] = _OPENCODE_UA
+
+
+def _forward_headers(headers: dict[str, str], host: str) -> dict[str, str]:
+    """Rebuild the upstream header set to mirror the official client.
+
+    Missing identity headers are added, already-canonical values are kept,
+    and legacy ones (``x-opencode-request``) are dropped.
+    """
+    out = _strip_unforwardable_headers(headers)
+    known = {k.lower(): k for k in out}
+    _apply_session_headers(
+        out, known, _canonical_session_id(_client_session_seed(headers))
+    )
+    # Recompute the map: the session rewrite mutated ``out`` above.
+    known = {k.lower(): k for k in out}
+    if "x-opencode-project" not in known:
+        out["X-Opencode-Project"] = _client_project_id()
+    _ensure_user_agent(out, known)
+    if "x-opencode-client" not in known:
+        out["X-Opencode-Client"] = _CLIENT_NAME
+    if "authorization" not in known:
+        out["Authorization"] = _ANONYMOUS_AUTH
+    if "accept" not in known:
+        out["Accept"] = _ACCEPT
+    if "content-type" not in known:
         out["Content-Type"] = "application/json"
     out["Host"] = host
     return out
@@ -278,14 +484,13 @@ def _fetch(
 ) -> httpx.Response:
     url = upstream_url(cfg_obj, request.path)
     host_header = httpx.URL(url).host  # type: ignore[attr-defined]
-    out_headers = _forward_headers(
-        request.headers, host_header or "", inject=cfg_obj.bridge_inject_session
-    )
+    out_headers = _forward_headers(request.headers, host_header or "")
     # Ask for identity so httpx neither injects its own Accept-Encoding nor
     # transparently decompresses: the body is then passed through verbatim.
     out_headers["Accept-Encoding"] = "identity"
     if os.environ.get("OPENROT_DEBUG_REQ"):
         _debug_request("OUT", url, out_headers, request.body)
+        _debug_dump("out", request.body)
     try:
         req = httpx.Request(
             request.method, url, headers=out_headers, content=request.body
@@ -300,10 +505,17 @@ def _is_usage_limit_error(resp: httpx.Response) -> bool:
     if resp.status_code != 429:
         return False
     try:
+        # The upstream leg is streamed (``_fetch`` uses ``stream=True``), so the
+        # body is unreadable until ``read()`` is called — otherwise httpx raises
+        # ResponseNotRead from ``resp.text``. Only 429 payloads get buffered
+        # here, and they are small error JSON; the 200 path still streams.
+        resp.read()
         data = json.loads(resp.text)
         error = data.get("error", {})
         return isinstance(error, dict) and error.get("type") == "FreeUsageLimitError"
-    except json.JSONDecodeError, AttributeError:
+    except json.JSONDecodeError, AttributeError, httpx.HTTPError, RuntimeError:
+        # Best effort: any read/parse failure means "not a usage limit", which
+        # only costs the slower plain-retry path instead of a 502 to the client.
         return False
 
 
@@ -430,6 +642,40 @@ def forward(
     return resp, client
 
 
+def _write_body(
+    handler: BaseHTTPRequestHandler,
+    resp: httpx.Response,
+    *,
+    chunked: bool,
+    error_body: bytearray | None,
+) -> int:
+    """Stream the response body to the client, returning bytes written.
+
+    When ``error_body`` is given, each chunk is also accumulated into it so a
+    non-200 body can be logged in full after the stream ends. A client that
+    disconnects mid-stream stops the copy but keeps the bytes written so far.
+    """
+    sent = 0
+    try:
+        for chunk in resp.iter_bytes():
+            if chunked:
+                handler.wfile.write(f"{len(chunk):x}\r\n".encode())
+                handler.wfile.write(chunk)
+                handler.wfile.write(b"\r\n")
+            else:
+                handler.wfile.write(chunk)
+            sent += len(chunk)
+            if error_body is not None:
+                error_body.extend(chunk)
+            handler.wfile.flush()
+        if chunked:
+            handler.wfile.write(b"0\r\n\r\n")
+            handler.wfile.flush()
+    except BrokenPipeError, ConnectionResetError, OSError:
+        pass
+    return sent
+
+
 def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> int:
     """Write an upstream response back to the connected client, streaming the body.
 
@@ -446,7 +692,10 @@ def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> int:
     encodings = list(resp.headers.get_list("content-encoding", split_commas=True))
     normalized = {enc.lower().strip() for enc in encodings}
     decoded = bool(normalized.intersection({"gzip", "deflate", "br", "zstd"}))
+    chunked = decoded or not resp.headers.get("content-length")
     sent = 0
+    # Non-200 bodies are small error payloads; keep them to log in full.
+    error_body = bytearray() if resp.status_code != 200 else None
     try:
         handler.send_response(resp.status_code)
         for key, value in resp.headers.items():
@@ -456,27 +705,16 @@ def _respond(handler: BaseHTTPRequestHandler, resp: httpx.Response) -> int:
                 continue
             with contextlib.suppress(ValueError, OSError):
                 handler.send_header(key, value)
-        if decoded or not resp.headers.get("content-length"):
+        if chunked:
             handler.send_header("Transfer-Encoding", "chunked")
         handler.end_headers()
-        if decoded or not resp.headers.get("content-length"):
-            for chunk in resp.iter_bytes():
-                handler.wfile.write(f"{len(chunk):x}\r\n".encode())
-                handler.wfile.write(chunk)
-                handler.wfile.write(b"\r\n")
-                sent += len(chunk)
-                handler.wfile.flush()
-            handler.wfile.write(b"0\r\n\r\n")
-            handler.wfile.flush()
-        else:
-            for chunk in resp.iter_bytes():
-                handler.wfile.write(chunk)
-                sent += len(chunk)
-                handler.wfile.flush()
+        sent = _write_body(handler, resp, chunked=chunked, error_body=error_body)
     except BrokenPipeError, ConnectionResetError, OSError:
         pass
     finally:
         resp.close()
+    if error_body is not None:
+        _log_error_body(resp.status_code, bytes(error_body))
     return sent
 
 
@@ -672,20 +910,45 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._output_chars = 0
         self._status = 502
         self._log_request_console(method)
+        _log_error_body(502, _error_payload(str(exc)))
         _send_502(self, str(exc))
 
     def _handle(self, method: str) -> None:
+        """Entry point: log unexpected errors instead of losing them to stderr.
+
+        ``socketserver`` routes handler exceptions to ``handle_error``; without
+        this wrapper the client never gets a response and simply hangs.
+        """
+        try:
+            self._dispatch(method)
+        except Exception as exc:
+            self._status = 502
+            self._output_chars = 0
+            self._elapsed_ms = getattr(self, "_elapsed_ms", 0)
+            _log(
+                f"[bridge] unhandled {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            with contextlib.suppress(Exception):
+                self._log_request_console(method)
+            with contextlib.suppress(OSError):
+                _send_502(self, str(exc))
+
+    def _dispatch(self, method: str) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
 
         self._inspect_body(body)
 
         cfg_obj = cfg.load_config()
-        if cfg_obj.bridge_inject_session:
-            body = _ensure_tools(body)
+        # Body normalization is chat-specific: only /chat/completions is rewritten,
+        # any other path passes the body through verbatim.
+        if self.path.endswith("/chat/completions"):
+            body = _normalize_body(body)
         request = _Request(method, self.path, dict(self.headers.items()), body)
         if os.environ.get("OPENROT_DEBUG_REQ"):
             _debug_request(method, self.path, request.headers, request.body)
+            _debug_dump("in", request.body)
         semaphore = _get_semaphore(cfg_obj)
         t0 = time.monotonic()
         semaphore.acquire()
@@ -718,6 +981,10 @@ class Bridge(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        """Log handler tracebacks via the events logger (daemon stderr is /dev/null)."""
+        _log(f"[bridge] handler error:\n{traceback.format_exc()}")
 
     def __init__(self, host: str, port: int) -> None:
         super().__init__((host, port), BridgeHandler)

@@ -23,7 +23,7 @@ opencode ──HTTP──▶ openrot bridge (127.0.0.1:7891)
                WARP SOCKS5 (127.0.0.1:40000)
                         │
                         ▼
-               bridge_upstream (https://opencode.ai/zen)
+               bridge_upstream (https://opencode.ai/inference)
 ```
 
 ## Зачем это нужно
@@ -158,36 +158,46 @@ loopback-прокси, совместимое с OpenAI (`baseURL`), котор�
 `bridge_retry_attempts`.
 
 Апстрим и порт настраиваются — см. поля конфига `bridge_port` (по умолчанию
-`7891`) и `bridge_upstream` (по умолчанию `https://opencode.ai/zen`; путь
+`7891`) и `bridge_upstream` (по умолчанию `https://opencode.ai/inference`; путь
 входящего запроса, например `/v1/chat/completions`, добавляется к этой базе),
 либо env-переопределения `OPENROT_BRIDGE_PORT` и `OPENROT_UPSTREAM`.
 
 ### Сессионные заголовки бесплатного тира
 
-Бесплатный тир opencode ориентируется на заголовок `X-Opencode-Session`:
-голый запрос без него попадает в анонимную квоту и может быть отклонён с
-`FreeUsageLimitError`. Когда `bridge_inject_session` включён (по умолчанию),
-bridge добавляет в каждый запрос к апстриму (если их ещё нет):
+Bridge нормализует каждый исходящий запрос в ту форму, которую принимает
+бесплатный гейтвей (те же правила, что у официального клиента opencode):
 
-- `X-Opencode-Session` — `ses_` + 26 цифр
-- `X-Opencode-Request` — `msg_` + 24 alnum
-- `User-Agent` opencode (не-opencode заменяется)
-- заглушки в массиве `tools` тел чатов (гейтвею бесплатного тира нужно
-  минимум два)
-
-Значения, присланные клиентом, никогда не перезаписываются. Выключить можно
-через `bridge_inject_session: false` в конфиге или
-`OPENROT_BRIDGE_INJECT_SESSION=0`:
+- четыре сессионных заголовка (`X-Opencode-Session`, `X-Opencode-Session-Id`,
+  `X-Session-Affinity`, `X-Session-Id`) выставляются в одно каноническое
+  значение `ses_` — каноническая сессия клиента сохраняется (affinity
+  промпт-кэша), любое другое значение детерминированно перекодируется в
+  каноническое;
+- при отсутствии добавляются `X-Opencode-Project` (40 hex) и
+  `X-Opencode-Client: cli`;
+- `User-Agent` выставляется opencode-овый (не-opencode заменяется);
+- устаревший `X-Opencode-Request` всегда вырезается и никогда не инжектится;
+- отсутствующий `Authorization` подставляется как `Bearer public`;
+- в телах чатов: включается streaming и `stream_options.include_usage`,
+  распознанные имена тулов заменяются настоящими определениями,
+  недостающие core-тулы (`shell`, `edit`, `glob`, `grep`, `read`) добавляются;
+  неизвестные тулы клиента пропускаются как есть;
+- system-промпт генератора заголовков opencode — он уходит в начале каждого
+  нового чата — заменяется на перефразированный эквивалент
+  (`core/data/title_system.txt`). Гейтвей фингерпринтит оригинал по
+  маркерам `task`/`rules`/`examples` вместе (ни одна отдельная строка не
+  срабатывает) и отвечает `403 FreeTierError`, поэтому без подмены первый
+  запрос каждого нового чата падает, а настоящий запрос сразу за ним
+  проходит. Подмена идемпотентна и посторонние system-промпты не трогает.
 
 ```bash
-# через bridge: заголовки добавляются автоматически
+# через bridge: заголовки нормализуются автоматически
 curl -s http://127.0.0.1:7891/v1/chat/completions \
-  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+  -H 'Content-Type: application/json' -d '{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}'
 
-# напрямую в апстрим: добавьте заголовок сами
-curl -s https://opencode.ai/zen/v1/chat/completions \
-  -H 'X-Opencode-Session: ses_<26 цифр>' \
-  -H 'Content-Type: application/json' -d '{"model":"opencode/sonnet","messages":[{"role":"user","content":"hi"}]}'
+# напрямую в апстрим
+curl -s https://opencode.ai/inference/v1/chat/completions \
+  -H 'X-Opencode-Session: ses_<canonical>' \
+  -H 'Content-Type: application/json' -d '{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Конфигурация
@@ -200,12 +210,11 @@ curl -s https://opencode.ai/zen/v1/chat/completions \
 health_interval: 30      # секунды между проверками здоровья WARP (health loop)
 active_level: none       # none | warp (пишется при start/stop)
 bridge_port: 7891        # loopback-порт для bridge opencode
-bridge_upstream: "https://opencode.ai/zen"  # путь запроса добавляется к этой базе
+bridge_upstream: "https://opencode.ai/inference"  # путь запроса добавляется к этой базе
 bridge_retry_statuses: [429]   # статусы апстрима, вызывающие ретрай
 bridge_retry_attempts: 1       # максимум повторов на запрос
 bridge_max_concurrent: 3       # максимум параллельных запросов к апстриму
 bridge_min_interval: 0.5       # минимум секунд между стартами запросов к апстриму
-bridge_inject_session: true    # инъекция сессионных заголовков / UA / tools
 ```
 
 ### Переопределения через переменные окружения
@@ -221,14 +230,14 @@ bridge_inject_session: true    # инъекция сессионных заго�
 | `OPENROT_BRIDGE_RETRY_ATTEMPTS` | → `bridge_retry_attempts` |
 | `OPENROT_BRIDGE_MAX_CONCURRENT` | → `bridge_max_concurrent` |
 | `OPENROT_BRIDGE_MIN_INTERVAL` | → `bridge_min_interval` |
-| `OPENROT_BRIDGE_INJECT_SESSION` | → `bridge_inject_session` (bool) |
 | `OPENROT_WARP` | имя/путь бинарника warp-cli (по умолчанию `warp-cli`) |
 | `OPENROT_WARP_HOST` / `OPENROT_WARP_PORT` | SOCKS5-адрес WARP (по умолчанию `127.0.0.1:40000`) |
 | `OPENROT_WARP_ROTATE_DELAY` / `OPENROT_WARP_ROTATE_ATTEMPTS` | темп ротации: секунды между попытками / максимум попыток (по умолчанию `10` / `5`) |
-| `OPENROT_DEBUG_REQ` | подробное логирование запросов bridge (секреты в auth-заголовках маскируются) |
+| `OPENROT_DEBUG_REQ` | подробное логирование запросов bridge (секреты в auth-заголовках маскируются) плюс дампы сырых входящих/исходящих тел в `debug/` |
 
 Пути рантайма, все внутри базового каталога: `config.yaml`,
-`openrot.log`, `openrot-bridge.daemon.pid`.
+`openrot.log`, `openrot-bridge.daemon.pid`, `debug/` (дампы сырых тел,
+пишутся только при `OPENROT_DEBUG_REQ=1`).
 
 ## Установка (самостоятельно / Docker)
 
