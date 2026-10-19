@@ -5,7 +5,9 @@ a = Analysis(
     ['openrot/__main__.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    # Package data read via Path(__file__).parent at import time
+    # (openrot/core/opencode_tools.py) must be shipped next to the module.
+    datas=[('openrot/core/data', 'openrot/core/data')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
